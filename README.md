@@ -23,8 +23,8 @@ Co-authorship note: the CLI-oriented workflow was co-authored with Gustavo Campi
 Clone the repository, enter it, and install it in editable mode:
 
 ```bash
-git clone https://github.com/rohanplatts/nanonis-file-conversion.git
-cd nanonis-file-conversion
+git clone https://github.com/SPMQT-Lab/nanonis-file-conversion-1.01.git
+cd nanonis-file-conversion-1.01
 python -m pip install -e .
 ```
 
