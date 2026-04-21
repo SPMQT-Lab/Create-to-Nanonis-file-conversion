@@ -1,26 +1,27 @@
-# NANONIS File Conversion
+# Createc to Nanonis File Conversion
 
 ## What It Does
 
-This repository is dedicated towards NANONIS raw data file conversion, to enable the usage of image analysis software that is built for one specific raw data file format, for several file formats. Currently the file conversions supported are:
+This repository converts **Createc** raw scan data files (`.dat`) into formats compatible with Nanonis analysis software. Currently supported conversions:
 
-* NANONIS images as .dat -> .sxm
-* NANONIS images as .dat -> .png
+* Createc `.dat` → Nanonis `.sxm`
+* Createc `.dat` → `.png` preview images
 
-We have two command line tools that implement the above.
+We have three tools that implement the above:
 
-- `dat-png` converts image `.dat` files into PNG previews
-- `dat-sxm` converts image `.dat` files into `.sxm` files
+- `dat-gui` — graphical interface (recommended for most users)
+- `dat-png` — CLI: convert to PNG
+- `dat-sxm` — CLI: convert to SXM
 
-Both commands accept either a single `.dat` file or a directory of `.dat` files.
+Both CLI commands accept either a single `.dat` file or a directory of `.dat` files.
 
 ## Installation
 
 Clone the repository, enter it, and install it in editable mode:
 
 ```bash
-git clone https://github.com/SPMQT-Lab/nanonis-file-conversion-1.01.git
-cd nanonis-file-conversion-1.01
+git clone https://github.com/SPMQT-Lab/Createc-to-Nanonis-file-conversion.git
+cd Createc-to-Nanonis-file-conversion
 python -m pip install -e .
 ```
 
@@ -75,12 +76,6 @@ Convert to `.sxm`:
 dat-sxm --input-dir path/to/input --output-dir path/to/output
 ```
 
-If your cushion files are stored somewhere else, provide them explicitly:
-
-```bash
-dat-sxm --input-dir path/to/input --output-dir path/to/output --cushion-dir path/to/file_cushions
-```
-
 ### Optional flags
 
 Both `dat-png` and `dat-sxm` support these additional flags:
@@ -103,6 +98,7 @@ dat-png --input-dir path/to/input --output-dir path/to/output --clip-low 2 --cli
   - `common.py`: shared utilities (DAC scaling, header parsing, image processing)
   - `dats_to_pngs.py`: PNG conversion tool
   - `dat_sxm_cli.py`: SXM conversion tool
+  - `gui.py`: graphical interface
 - [src/file_cushions](src/file_cushions): required layout assets for `.sxm` generation
 - [data/sample_input](data/sample_input): two small example `.dat` files
 - [tests](tests): pytest test suite (63 tests)

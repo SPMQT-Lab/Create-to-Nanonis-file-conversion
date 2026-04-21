@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nanonis-file-conversion"
+name = "createc-to-nanonis-file-conversion"
 version = "1.01.0"
-description = "CLI tools for converting Nanonis STM image .dat files to .sxm and preview PNG outputs."
+description = "CLI tools for converting Createc STM .dat files to Nanonis .sxm format and PNG previews."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
