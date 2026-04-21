@@ -25,8 +25,8 @@ Three tools are provided:
 ## Installation
 
 ```bash
-git clone https://github.com/SPMQT-Lab/Createc-to-Nanonis-file-conversion.git
-cd Createc-to-Nanonis-file-conversion
+git clone https://github.com/SPMQT-Lab/ProbeFlow.git
+cd ProbeFlow
 python -m pip install -e .
 ```
 

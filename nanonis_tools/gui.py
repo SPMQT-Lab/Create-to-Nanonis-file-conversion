@@ -34,7 +34,7 @@ DEFAULT_CUSHION = REPO_ROOT / "src" / "file_cushions"
 LOGO_PATH       = REPO_ROOT / "assets" / "logo.png"
 LOGO_GIF_PATH   = REPO_ROOT / "assets" / "logo.gif"
 LOGO_NAV_PATH   = REPO_ROOT / "assets" / "logo_nav.png"
-GITHUB_URL      = "https://github.com/SPMQT-Lab/Createc-to-Nanonis-file-conversion"
+GITHUB_URL      = "https://github.com/SPMQT-Lab/ProbeFlow"
 
 NAVBAR_BG = "#3273dc"
 NAVBAR_H  = 58
@@ -1260,40 +1260,18 @@ class Navbar(QWidget):
             logo_lbl = QLabel()
             logo_lbl.setStyleSheet("background: transparent;")
             pix = QPixmap(str(nav_logo_path))
-            # Scale to navbar height, unconstrained width so no letters are cut
             logo_lbl.setPixmap(
-                pix.scaled(9999, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                pix.scaled(9999, 46, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             logo_lbl.setCursor(QCursor(Qt.PointingHandCursor))
             logo_lbl.mousePressEvent = lambda e: webbrowser.open(GITHUB_URL)
             lay.addWidget(logo_lbl)
 
-        tf = QWidget()
-        tf.setStyleSheet("background: transparent;")
-        tf_lay = QVBoxLayout(tf)
-        tf_lay.setContentsMargins(4, 0, 0, 0)
-        tf_lay.setSpacing(0)
-        t2 = QLabel("Createc → Nanonis")
-        t2.setFont(QFont("Helvetica", 8))
-        t2.setStyleSheet("color: #a8c8f0; background: transparent;")
-        tf_lay.addWidget(t2)
-        lay.addWidget(tf)
         lay.addStretch()
 
         def _nbtn(text: str, slot) -> QPushButton:
             btn = QPushButton(text)
             btn.setFont(QFont("Helvetica", 9))
-            btn.setStyleSheet("""
-                QPushButton {
-                    color: #ffffff;
-                    background-color: transparent;
-                    border: 1px solid rgba(255,255,255,0.35);
-                    border-radius: 4px;
-                    padding: 4px 12px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(255,255,255,0.15);
-                }
-            """)
+            btn.setObjectName("navBtn")
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.clicked.connect(slot)
             lay.addWidget(btn)
@@ -1644,6 +1622,16 @@ QPushButton#accentBtn {{
 QPushButton#accentBtn:disabled {{
     background-color: {t['entry_bg']};
     color: {t['sub_fg']};
+}}
+QPushButton#navBtn {{
+    color: #ffffff;
+    background-color: transparent;
+    border: 1px solid rgba(255,255,255,0.40);
+    border-radius: 4px;
+    padding: 4px 12px;
+}}
+QPushButton#navBtn:hover {{
+    background-color: rgba(255,255,255,0.18);
 }}
 QComboBox {{
     background-color: {t['entry_bg']};
