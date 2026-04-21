@@ -36,8 +36,9 @@ LOGO_GIF_PATH   = REPO_ROOT / "assets" / "logo.gif"
 LOGO_NAV_PATH   = REPO_ROOT / "assets" / "logo_nav.png"
 GITHUB_URL      = "https://github.com/SPMQT-Lab/ProbeFlow"
 
-NAVBAR_BG = "#3273dc"
-NAVBAR_H  = 58
+NAVBAR_DARK_BG  = "#3273dc"
+NAVBAR_LIGHT_BG = "#ffffff"
+NAVBAR_H        = 58
 
 # ── Themes ────────────────────────────────────────────────────────────────────
 THEMES = {
@@ -52,6 +53,7 @@ THEMES = {
         "ok_fg":      "#a6e3a1",
         "err_fg":     "#f38ba8",
         "warn_fg":    "#fab387",
+        "info_fg":    "#cdd6f4",
         "accent_bg":  "#89b4fa",
         "accent_fg":  "#1e1e2e",
         "sep":        "#45475a",
@@ -75,26 +77,27 @@ THEMES = {
         "bg":         "#f8f9fa",
         "fg":         "#1e1e2e",
         "entry_bg":   "#ffffff",
-        "btn_bg":     "#e0e0e0",
+        "btn_bg":     "#d0d4da",
         "btn_fg":     "#1e1e2e",
         "log_bg":     "#ffffff",
         "log_fg":     "#1e1e2e",
         "ok_fg":      "#1a7a1a",
         "err_fg":     "#c0392b",
         "warn_fg":    "#b07800",
+        "info_fg":    "#1e1e2e",
         "accent_bg":  "#3273dc",
         "accent_fg":  "#ffffff",
-        "sep":        "#dee2e6",
-        "sub_fg":     "#6c757d",
-        "sidebar_bg": "#eff5fb",
-        "main_bg":    "#eef6fc",
-        "status_bg":  "#f5f5f5",
-        "status_fg":  "#6c757d",
-        "card_bg":    "#d0e4f4",
+        "sep":        "#b0bec5",
+        "sub_fg":     "#4a5568",
+        "sidebar_bg": "#f0f2f5",
+        "main_bg":    "#ffffff",
+        "status_bg":  "#f0f2f5",
+        "status_fg":  "#4a5568",
+        "card_bg":    "#dce8f5",
         "card_sel":   "#b8d4ee",
         "card_fg":    "#1e1e2e",
         "tab_act":    "#ffffff",
-        "tab_inact":  "#d8eaf8",
+        "tab_inact":  "#e4edf8",
         "tree_bg":    "#ffffff",
         "tree_fg":    "#1e1e2e",
         "tree_sel":   "#cce0f5",
@@ -175,10 +178,26 @@ PLANE_NAMES = ["Z fwd", "Z bwd", "I fwd", "I bwd"]
 
 @dataclass
 class SxmFile:
-    path: Path
-    stem: str
-    Nx:   int = 512
-    Ny:   int = 512
+    path:       Path
+    stem:       str
+    Nx:         int            = 512
+    Ny:         int            = 512
+    bias_mv:    Optional[float] = None
+    current_pa: Optional[float] = None
+    scan_nm:    Optional[float] = None
+
+
+def _card_meta_str(entry: SxmFile) -> str:
+    """Format key physical parameters for the thumbnail card label."""
+    line1 = "  |  ".join(filter(None, [
+        f"{entry.Nx}×{entry.Ny}" if entry.Nx > 0 else "",
+        f"{entry.scan_nm:.1f} nm" if entry.scan_nm is not None else "",
+    ]))
+    line2 = "  |  ".join(filter(None, [
+        f"{entry.bias_mv:.0f} mV"    if entry.bias_mv    is not None else "",
+        f"{entry.current_pa:.0f} pA" if entry.current_pa is not None else "",
+    ]))
+    return "\n".join(filter(None, [line1, line2]))
 
 
 # ── SXM parsing ───────────────────────────────────────────────────────────────
@@ -267,7 +286,29 @@ def scan_sxm_folder(root: Path) -> list[SxmFile]:
         try:
             hdr    = parse_sxm_header(sxm)
             Nx, Ny = _sxm_dims(hdr)
-            entries.append(SxmFile(path=sxm, stem=sxm.stem, Nx=Nx, Ny=Ny))
+
+            bias_mv = None
+            nums = [float(x) for x in _re.findall(
+                r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", hdr.get("BIAS", ""))]
+            if nums:
+                bias_mv = nums[0] * 1000  # V → mV
+
+            current_pa = None
+            sp = _re.search(
+                r"([-+]?\d+(?:\.\d+)?[eE][-+]?\d+)\s*A",
+                hdr.get("Z-CONTROLLER", ""))
+            if sp:
+                current_pa = float(sp.group(1)) * 1e12  # A → pA
+
+            scan_nm = None
+            rnums = [float(x) for x in _re.findall(
+                r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", hdr.get("SCAN_RANGE", ""))]
+            if rnums:
+                scan_nm = rnums[0] * 1e9  # m → nm
+
+            entries.append(SxmFile(path=sxm, stem=sxm.stem, Nx=Nx, Ny=Ny,
+                                   bias_mv=bias_mv, current_pa=current_pa,
+                                   scan_nm=scan_nm))
         except Exception:
             entries.append(SxmFile(path=sxm, stem=sxm.stem))
     return entries
@@ -365,6 +406,31 @@ class ChannelLoader(QRunnable):
             self.signals.loaded.emit(self.idx, pil_to_pixmap(img), self.token)
 
 
+# ── Worker: full-size viewer image ────────────────────────────────────────────
+class ViewerSignals(QObject):
+    loaded = Signal(QPixmap, object)
+
+
+class ViewerLoader(QRunnable):
+    def __init__(self, entry: SxmFile, colormap: str, token, w: int, h: int,
+                 plane_idx: int = 0):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.signals   = ViewerSignals()
+        self.entry     = entry
+        self.colormap  = colormap
+        self.token     = token
+        self.w         = w
+        self.h         = h
+        self.plane_idx = plane_idx
+
+    def run(self):
+        img = render_sxm_plane(self.entry.path, self.plane_idx, self.colormap,
+                                size=(self.w, self.h))
+        if img is not None:
+            self.signals.loaded.emit(pil_to_pixmap(img), self.token)
+
+
 # ── Worker: conversion ────────────────────────────────────────────────────────
 class ConversionSignals(QObject):
     log_msg  = Signal(str, str)
@@ -436,13 +502,14 @@ class ConversionWorker(QRunnable):
 
 # ── ScanCard ──────────────────────────────────────────────────────────────────
 class ScanCard(QFrame):
-    """Single thumbnail card. Supports single-click and Ctrl+click selection."""
-    clicked = Signal(object, bool)  # SxmFile, ctrl_held
+    """Single thumbnail card. Supports single-click, Ctrl+click, and double-click."""
+    clicked        = Signal(object, bool)  # SxmFile, ctrl_held
+    double_clicked = Signal(object)        # SxmFile
 
-    CARD_W = 172
-    CARD_H = 158
-    IMG_W  = 156
-    IMG_H  = 124
+    CARD_W = 200
+    CARD_H = 220
+    IMG_W  = 180
+    IMG_H  = 150
 
     def __init__(self, entry: SxmFile, t: dict, parent=None):
         super().__init__(parent)
@@ -455,8 +522,8 @@ class ScanCard(QFrame):
         self.setCursor(QCursor(Qt.PointingHandCursor))
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 2)
-        lay.setSpacing(2)
+        lay.setContentsMargins(8, 8, 8, 6)
+        lay.setSpacing(3)
 
         self.img_lbl = QLabel()
         self.img_lbl.setFixedSize(self.IMG_W, self.IMG_H)
@@ -466,10 +533,15 @@ class ScanCard(QFrame):
         lbl_text = entry.stem if len(entry.stem) <= 22 else entry.stem[:20] + ".."
         self.name_lbl = QLabel(lbl_text)
         self.name_lbl.setAlignment(Qt.AlignCenter)
-        self.name_lbl.setFont(QFont("Helvetica", 7))
+        self.name_lbl.setFont(QFont("Helvetica", 10))
+
+        self.meta_lbl = QLabel(_card_meta_str(entry))
+        self.meta_lbl.setAlignment(Qt.AlignCenter)
+        self.meta_lbl.setFont(QFont("Helvetica", 9))
 
         lay.addWidget(self.img_lbl)
         lay.addWidget(self.name_lbl)
+        lay.addWidget(self.meta_lbl)
         self._refresh_style()
 
     def set_pixmap(self, pixmap: QPixmap):
@@ -496,10 +568,14 @@ class ScanCard(QFrame):
             ScanCard {{
                 background-color: {bg};
                 border: {bw}px solid {border};
-                border-radius: 5px;
+                border-radius: 6px;
+            }}
+            ScanCard:hover {{
+                border: {bw}px solid {t["accent_bg"]};
             }}
         """)
         self.name_lbl.setStyleSheet(f"color: {fg}; background: transparent;")
+        self.meta_lbl.setStyleSheet(f"color: {t['sub_fg']}; background: transparent;")
         self.img_lbl.setStyleSheet(f"color: {t['sub_fg']}; background: transparent;")
 
     def mousePressEvent(self, event):
@@ -507,6 +583,11 @@ class ScanCard(QFrame):
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
             self.clicked.emit(self.entry, ctrl)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.double_clicked.emit(self.entry)
+        super().mouseDoubleClickEvent(event)
 
 
 # ── ThumbnailGrid ─────────────────────────────────────────────────────────────
@@ -516,12 +597,14 @@ class ThumbnailGrid(QWidget):
 
     - All images default to grayscale on load.
     - Click = single-select; Ctrl+click = multi-select toggle.
+    - Double-click = open full-size image viewer.
     - set_colormap_for_selection() reloads ONLY selected cards with the new colormap.
     - Unselected cards keep their current colormap (gray by default).
     """
-    entry_selected   = Signal(object)          # primary SxmFile for sidebar
-    selection_changed = Signal(int)            # count of selected items
+    entry_selected        = Signal(object)   # primary SxmFile for sidebar
+    selection_changed     = Signal(int)      # count of selected items
     open_folder_requested = Signal()
+    view_requested        = Signal(object)   # SxmFile to open in viewer
 
     GAP = 10
 
@@ -536,19 +619,19 @@ class ThumbnailGrid(QWidget):
 
         # ── Folder toolbar ───────────────────────────────────────────────────
         self._toolbar = QWidget()
-        self._toolbar.setFixedHeight(40)
+        self._toolbar.setFixedHeight(48)
         tb_lay = QHBoxLayout(self._toolbar)
-        tb_lay.setContentsMargins(8, 4, 8, 4)
+        tb_lay.setContentsMargins(8, 6, 8, 6)
         tb_lay.setSpacing(8)
 
         self._open_btn = QPushButton("Open SXM folder…")
-        self._open_btn.setFont(QFont("Helvetica", 9))
+        self._open_btn.setFont(QFont("Helvetica", 11))
         self._open_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._open_btn.setFixedHeight(28)
+        self._open_btn.setFixedHeight(32)
         self._open_btn.clicked.connect(self.open_folder_requested.emit)
 
         self._path_lbl = QLabel("No folder open")
-        self._path_lbl.setFont(QFont("Helvetica", 8))
+        self._path_lbl.setFont(QFont("Helvetica", 10))
         self._path_lbl.setStyleSheet("background: transparent;")
 
         tb_lay.addWidget(self._open_btn)
@@ -581,7 +664,7 @@ class ThumbnailGrid(QWidget):
         # empty-state placeholder
         self._empty_lbl = QLabel("Open a folder to browse SXM scans")
         self._empty_lbl.setAlignment(Qt.AlignCenter)
-        self._empty_lbl.setFont(QFont("Helvetica", 10))
+        self._empty_lbl.setFont(QFont("Helvetica", 12))
         self._grid.addWidget(self._empty_lbl, 0, 0)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -606,6 +689,7 @@ class ThumbnailGrid(QWidget):
         if not entries:
             self._empty_lbl = QLabel("No .sxm files found in this folder")
             self._empty_lbl.setAlignment(Qt.AlignCenter)
+            self._empty_lbl.setFont(QFont("Helvetica", 12))
             self._grid.addWidget(self._empty_lbl, 0, 0)
             return
 
@@ -614,6 +698,7 @@ class ThumbnailGrid(QWidget):
         for i, entry in enumerate(entries):
             card = ScanCard(entry, self._t)
             card.clicked.connect(self._on_card_click)
+            card.double_clicked.connect(self._on_card_dbl)
             self._card_colormaps[entry.stem] = DEFAULT_CMAP_KEY
             row, col = divmod(i, cols)
             self._grid.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
@@ -700,6 +785,9 @@ class ThumbnailGrid(QWidget):
             if primary_entry:
                 self.entry_selected.emit(primary_entry)
 
+    def _on_card_dbl(self, entry: SxmFile):
+        self.view_requested.emit(entry)
+
     # ── Layout helpers ─────────────────────────────────────────────────────────
     def _calc_cols(self) -> int:
         vw = self._scroll.viewport().width()
@@ -728,6 +816,131 @@ class ThumbnailGrid(QWidget):
                 self._grid.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
 
 
+# ── Full-size image viewer dialog ─────────────────────────────────────────────
+class ImageViewerDialog(QDialog):
+    """Opens on double-click; shows full-size SXM plane with prev/next navigation."""
+
+    def __init__(self, entry: SxmFile, entries: list[SxmFile],
+                 colormap: str, t: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(entry.stem)
+        self.setMinimumSize(720, 620)
+
+        self._entries  = entries
+        self._colormap = colormap
+        self._t        = t
+        self._idx      = next((i for i, e in enumerate(entries) if e.stem == entry.stem), 0)
+        self._pool     = QThreadPool.globalInstance()
+        self._token    = object()
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 16)
+        lay.setSpacing(10)
+
+        self._title_lbl = QLabel(entry.stem)
+        self._title_lbl.setFont(QFont("Helvetica", 13, QFont.Bold))
+        self._title_lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._title_lbl)
+
+        # Channel selector
+        ch_row = QHBoxLayout()
+        ch_lbl = QLabel("Channel:")
+        ch_lbl.setFont(QFont("Helvetica", 11))
+        self._ch_cb = QComboBox()
+        self._ch_cb.addItems(PLANE_NAMES)
+        self._ch_cb.setFont(QFont("Helvetica", 11))
+        self._ch_cb.setFixedWidth(140)
+        self._ch_cb.currentIndexChanged.connect(self._on_channel_changed)
+        ch_row.addStretch()
+        ch_row.addWidget(ch_lbl)
+        ch_row.addWidget(self._ch_cb)
+        ch_row.addStretch()
+        lay.addLayout(ch_row)
+
+        self._img_lbl = QLabel("Loading…")
+        self._img_lbl.setAlignment(Qt.AlignCenter)
+        self._img_lbl.setMinimumSize(640, 500)
+        lay.addWidget(self._img_lbl, 1)
+
+        nav_row = QHBoxLayout()
+        self._prev_btn = QPushButton("← Prev")
+        self._prev_btn.setFont(QFont("Helvetica", 11))
+        self._prev_btn.setFixedWidth(100)
+        self._prev_btn.clicked.connect(self._go_prev)
+
+        self._pos_lbl = QLabel("")
+        self._pos_lbl.setAlignment(Qt.AlignCenter)
+        self._pos_lbl.setFont(QFont("Helvetica", 11))
+
+        self._next_btn = QPushButton("Next →")
+        self._next_btn.setFont(QFont("Helvetica", 11))
+        self._next_btn.setFixedWidth(100)
+        self._next_btn.clicked.connect(self._go_next)
+
+        close_btn = QPushButton("Close")
+        close_btn.setFont(QFont("Helvetica", 11))
+        close_btn.setFixedWidth(90)
+        close_btn.clicked.connect(self.accept)
+
+        nav_row.addWidget(self._prev_btn)
+        nav_row.addStretch()
+        nav_row.addWidget(self._pos_lbl)
+        nav_row.addStretch()
+        nav_row.addWidget(self._next_btn)
+        nav_row.addSpacing(20)
+        nav_row.addWidget(close_btn)
+        lay.addLayout(nav_row)
+
+        self._load_current()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_Return):
+            self.accept()
+        elif event.key() == Qt.Key_Left:
+            self._go_prev()
+        elif event.key() == Qt.Key_Right:
+            self._go_next()
+        else:
+            super().keyPressEvent(event)
+
+    def _go_prev(self):
+        if self._idx > 0:
+            self._idx -= 1
+            self._load_current()
+
+    def _go_next(self):
+        if self._idx < len(self._entries) - 1:
+            self._idx += 1
+            self._load_current()
+
+    def _load_current(self):
+        entry = self._entries[self._idx]
+        self._title_lbl.setText(entry.stem)
+        self._pos_lbl.setText(f"{self._idx + 1} / {len(self._entries)}")
+        self._prev_btn.setEnabled(self._idx > 0)
+        self._next_btn.setEnabled(self._idx < len(self._entries) - 1)
+        self._img_lbl.setText("Loading…")
+
+        self._token = object()
+        loader = ViewerLoader(entry, self._colormap, self._token, 800, 700,
+                              self._ch_cb.currentIndex())
+        loader.signals.loaded.connect(self._on_loaded)
+        self._pool.start(loader)
+
+    def _on_channel_changed(self, _: int):
+        self._load_current()
+
+    @Slot(QPixmap, object)
+    def _on_loaded(self, pixmap: QPixmap, token):
+        if token is not self._token:
+            return
+        sz = self._img_lbl.size()
+        self._img_lbl.setPixmap(
+            pixmap.scaled(sz.width(), sz.height(),
+                          Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._img_lbl.setText("")
+
+
 # ── Browse sidebar ────────────────────────────────────────────────────────────
 class BrowseSidebar(QWidget):
     colormap_apply_requested = Signal(str)   # emits colormap key
@@ -747,31 +960,56 @@ class BrowseSidebar(QWidget):
     def _build(self, cfg: dict):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 6)
-        lay.setSpacing(4)
+        lay.setSpacing(6)
 
         # File info
         self.name_lbl = QLabel("No scan selected")
-        self.name_lbl.setFont(QFont("Helvetica", 9, QFont.Bold))
+        self.name_lbl.setFont(QFont("Helvetica", 12, QFont.Bold))
         self.name_lbl.setWordWrap(True)
-        self.dim_lbl = QLabel("")
-        self.dim_lbl.setFont(QFont("Helvetica", 8))
         lay.addWidget(self.name_lbl)
-        lay.addWidget(self.dim_lbl)
+
+        # Quick-info grid: pixels, scan size, bias, setpoint
+        qi_widget = QWidget()
+        qi_lay    = QGridLayout(qi_widget)
+        qi_lay.setContentsMargins(0, 2, 0, 2)
+        qi_lay.setHorizontalSpacing(12)
+        qi_lay.setVerticalSpacing(4)
+        self._qi: dict[str, QLabel] = {}
+        for i, (key, label) in enumerate([
+            ("pixels", "Pixels"),
+            ("size",   "Scan size"),
+            ("bias",   "Bias"),
+            ("setp",   "Setpoint"),
+        ]):
+            r, c = divmod(i, 2)
+            cell     = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(1)
+            k_lbl = QLabel(label)
+            k_lbl.setFont(QFont("Helvetica", 8, QFont.Bold))
+            v_lbl = QLabel("—")
+            v_lbl.setFont(QFont("Helvetica", 11))
+            cell_lay.addWidget(k_lbl)
+            cell_lay.addWidget(v_lbl)
+            qi_lay.addWidget(cell, r, c)
+            self._qi[key] = v_lbl
+        lay.addWidget(qi_widget)
         lay.addWidget(_sep())
 
         # Colormap + Apply button
         cm_lbl = QLabel("Colormap")
-        cm_lbl.setFont(QFont("Helvetica", 9, QFont.Bold))
+        cm_lbl.setFont(QFont("Helvetica", 11, QFont.Bold))
         lay.addWidget(cm_lbl)
 
         cm_row = QHBoxLayout()
         self.cmap_cb = QComboBox()
         self.cmap_cb.addItems(CMAP_NAMES)
         self.cmap_cb.setCurrentText(cfg.get("colormap", DEFAULT_CMAP_LABEL))
-        self.cmap_cb.setFont(QFont("Helvetica", 9))
+        self.cmap_cb.setFont(QFont("Helvetica", 10))
         self._apply_btn = QPushButton("Apply to selection")
-        self._apply_btn.setFont(QFont("Helvetica", 8))
-        self._apply_btn.setFixedHeight(26)
+        self._apply_btn.setFont(QFont("Helvetica", 10))
+        self._apply_btn.setFixedHeight(30)
         self._apply_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._apply_btn.setObjectName("accentBtn")
         self._apply_btn.clicked.connect(self._on_apply)
@@ -780,7 +1018,7 @@ class BrowseSidebar(QWidget):
         lay.addLayout(cm_row)
 
         self._sel_hint = QLabel("Select images first (Ctrl+click for multi-select)")
-        self._sel_hint.setFont(QFont("Helvetica", 7))
+        self._sel_hint.setFont(QFont("Helvetica", 9))
         self._sel_hint.setWordWrap(True)
         lay.addWidget(self._sel_hint)
         lay.addWidget(_sep())
@@ -829,11 +1067,11 @@ class BrowseSidebar(QWidget):
 
         # 4-channel thumbnails (2×2)
         ch_hdr = QLabel("Channels")
-        ch_hdr.setFont(QFont("Helvetica", 9, QFont.Bold))
+        ch_hdr.setFont(QFont("Helvetica", 11, QFont.Bold))
         lay.addWidget(ch_hdr)
 
         ch_grid = QGridLayout()
-        ch_grid.setSpacing(4)
+        ch_grid.setSpacing(8)
         ch_grid.setContentsMargins(0, 0, 0, 0)
         self._ch_img_lbls:  list[QLabel] = []
         self._ch_name_lbls: list[QLabel] = []
@@ -842,13 +1080,13 @@ class BrowseSidebar(QWidget):
             cell     = QWidget()
             cell_lay = QVBoxLayout(cell)
             cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(1)
+            cell_lay.setSpacing(2)
             img_lbl = QLabel()
-            img_lbl.setFixedSize(124, 98)
+            img_lbl.setFixedSize(128, 102)
             img_lbl.setAlignment(Qt.AlignCenter)
             img_lbl.setFrameShape(QFrame.StyledPanel)
             nm_lbl = QLabel(name)
-            nm_lbl.setFont(QFont("Helvetica", 7))
+            nm_lbl.setFont(QFont("Helvetica", 9))
             nm_lbl.setAlignment(Qt.AlignCenter)
             cell_lay.addWidget(img_lbl)
             cell_lay.addWidget(nm_lbl)
@@ -861,11 +1099,11 @@ class BrowseSidebar(QWidget):
         # Metadata table + search
         meta_hdr_row = QHBoxLayout()
         meta_hdr = QLabel("Metadata")
-        meta_hdr.setFont(QFont("Helvetica", 9, QFont.Bold))
+        meta_hdr.setFont(QFont("Helvetica", 11, QFont.Bold))
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search…")
-        self.search_box.setFont(QFont("Helvetica", 8))
-        self.search_box.setFixedHeight(22)
+        self.search_box.setFont(QFont("Helvetica", 10))
+        self.search_box.setFixedHeight(28)
         self.search_box.textChanged.connect(self._filter_meta)
         meta_hdr_row.addWidget(meta_hdr)
         meta_hdr_row.addStretch()
@@ -882,8 +1120,8 @@ class BrowseSidebar(QWidget):
         self.meta_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.meta_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.meta_table.setAlternatingRowColors(True)
-        self.meta_table.setFont(QFont("Helvetica", 8))
-        self.meta_table.verticalHeader().setDefaultSectionSize(17)
+        self.meta_table.setFont(QFont("Helvetica", 10))
+        self.meta_table.verticalHeader().setDefaultSectionSize(22)
         self.meta_table.setShowGrid(False)
         lay.addWidget(self.meta_table, 1)
 
@@ -905,21 +1143,28 @@ class BrowseSidebar(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
     def show_entry(self, entry: SxmFile, colormap_key: str):
         self.name_lbl.setText(entry.stem)
-        self.dim_lbl.setText(f"{entry.Nx} × {entry.Ny} px")
+        self._qi["pixels"].setText(f"{entry.Nx} × {entry.Ny}")
+        self._qi["size"].setText(f"{entry.scan_nm:.1f} nm" if entry.scan_nm is not None else "—")
+        self._qi["bias"].setText(f"{entry.bias_mv:.0f} mV" if entry.bias_mv is not None else "—")
+        self._qi["setp"].setText(f"{entry.current_pa:.1f} pA" if entry.current_pa is not None else "—")
         self._load_channels(entry, colormap_key)
         self._load_metadata(entry)
 
     def update_selection_hint(self, n_selected: int):
         if n_selected == 0:
             self._sel_hint.setText("Select images first (Ctrl+click for multi-select)")
+            self._apply_btn.setEnabled(False)
         elif n_selected == 1:
             self._sel_hint.setText("1 image selected — click Apply to colorize")
+            self._apply_btn.setEnabled(True)
         else:
             self._sel_hint.setText(f"{n_selected} images selected — click Apply to colorize")
+            self._apply_btn.setEnabled(True)
 
     def clear(self):
         self.name_lbl.setText("No scan selected")
-        self.dim_lbl.setText("")
+        for v in self._qi.values():
+            v.setText("—")
         for lbl in self._ch_img_lbls:
             lbl.clear()
         self._meta_rows = []
@@ -938,7 +1183,7 @@ class BrowseSidebar(QWidget):
         self._ch_sigs = sigs
         for i in range(4):
             loader = ChannelLoader(entry, i, colormap_key,
-                                   self._ch_token, 120, 94, sigs,
+                                   self._ch_token, 124, 98, sigs,
                                    self._clip_low, self._clip_high)
             self._pool.start(loader)
 
@@ -991,20 +1236,20 @@ class ConvertPanel(QWidget):
         super().__init__(parent)
         self._t = t
         lay     = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 8)
-        lay.setSpacing(8)
+        lay.setContentsMargins(16, 16, 16, 12)
+        lay.setSpacing(10)
 
         # Input folder (always visible)
         in_row = QHBoxLayout()
         in_lbl = QLabel("Input folder:")
-        in_lbl.setFixedWidth(100)
-        in_lbl.setFont(QFont("Helvetica", 9))
+        in_lbl.setFixedWidth(110)
+        in_lbl.setFont(QFont("Helvetica", 11))
         self.input_entry = QLineEdit()
-        self.input_entry.setFont(QFont("Helvetica", 9))
+        self.input_entry.setFont(QFont("Helvetica", 11))
         self.input_entry.setPlaceholderText("Select folder with .dat files…")
         in_btn = QPushButton("Browse")
-        in_btn.setFont(QFont("Helvetica", 8))
-        in_btn.setFixedWidth(70)
+        in_btn.setFont(QFont("Helvetica", 10))
+        in_btn.setFixedWidth(80)
         in_btn.clicked.connect(self._browse_input)
         in_row.addWidget(in_lbl)
         in_row.addWidget(self.input_entry)
@@ -1013,7 +1258,7 @@ class ConvertPanel(QWidget):
 
         # Custom output checkbox + row (hidden by default)
         self._custom_out_cb = QCheckBox("Custom output folder")
-        self._custom_out_cb.setFont(QFont("Helvetica", 9))
+        self._custom_out_cb.setFont(QFont("Helvetica", 11))
         self._custom_out_cb.setChecked(cfg.get("custom_output", False))
         self._custom_out_cb.toggled.connect(self._toggle_output_row)
         lay.addWidget(self._custom_out_cb)
@@ -1022,14 +1267,14 @@ class ConvertPanel(QWidget):
         out_row = QHBoxLayout(self._out_row_widget)
         out_row.setContentsMargins(0, 0, 0, 0)
         out_lbl = QLabel("Output folder:")
-        out_lbl.setFixedWidth(100)
-        out_lbl.setFont(QFont("Helvetica", 9))
+        out_lbl.setFixedWidth(110)
+        out_lbl.setFont(QFont("Helvetica", 11))
         self.output_entry = QLineEdit()
-        self.output_entry.setFont(QFont("Helvetica", 9))
+        self.output_entry.setFont(QFont("Helvetica", 11))
         self.output_entry.setPlaceholderText("Defaults to input folder…")
         out_btn = QPushButton("Browse")
-        out_btn.setFont(QFont("Helvetica", 8))
-        out_btn.setFixedWidth(70)
+        out_btn.setFont(QFont("Helvetica", 10))
+        out_btn.setFixedWidth(80)
         out_btn.clicked.connect(self._browse_output)
         out_row.addWidget(out_lbl)
         out_row.addWidget(self.output_entry)
@@ -1041,10 +1286,10 @@ class ConvertPanel(QWidget):
 
         log_hdr = QHBoxLayout()
         log_lbl = QLabel("Conversion log")
-        log_lbl.setFont(QFont("Helvetica", 9, QFont.Bold))
+        log_lbl.setFont(QFont("Helvetica", 11, QFont.Bold))
         clear_btn = QPushButton("Clear")
-        clear_btn.setFont(QFont("Helvetica", 8))
-        clear_btn.setFixedWidth(50)
+        clear_btn.setFont(QFont("Helvetica", 10))
+        clear_btn.setFixedWidth(60)
         clear_btn.clicked.connect(lambda: self.log_text.clear())
         log_hdr.addWidget(log_lbl)
         log_hdr.addStretch()
@@ -1053,7 +1298,7 @@ class ConvertPanel(QWidget):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Courier", 9))
+        self.log_text.setFont(QFont("Courier", 11))
         lay.addWidget(self.log_text, 1)
 
         if cfg.get("input_dir"):
@@ -1070,14 +1315,11 @@ class ConvertPanel(QWidget):
             return self.output_entry.text().strip()
         return ""
 
+    def apply_theme(self, t: dict):
+        self._t = t
+
     def log(self, msg: str, tag: str = "info"):
-        colors = {
-            "ok":   "#a6e3a1",
-            "err":  "#f38ba8",
-            "warn": "#fab387",
-            "info": "#cdd6f4",
-        }
-        color = colors.get(tag, "#cdd6f4")
+        color = self._t.get(f"{tag}_fg", self._t.get("info_fg", self._t["fg"]))
         self.log_text.append(f'<span style="color:{color}">{msg}</span>')
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum())
@@ -1099,11 +1341,11 @@ class ConvertSidebar(QWidget):
         super().__init__(parent)
         self._t = t
         lay     = QVBoxLayout(self)
-        lay.setContentsMargins(10, 12, 10, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(12, 14, 12, 10)
+        lay.setSpacing(8)
 
         hdr = QLabel("Output format")
-        hdr.setFont(QFont("Helvetica", 9, QFont.Bold))
+        hdr.setFont(QFont("Helvetica", 12, QFont.Bold))
         lay.addWidget(hdr)
 
         self.png_cb = QCheckBox("PNG preview")
@@ -1111,14 +1353,14 @@ class ConvertSidebar(QWidget):
         self.png_cb.setChecked(cfg.get("do_png", False))
         self.sxm_cb.setChecked(cfg.get("do_sxm", True))
         for cb in (self.png_cb, self.sxm_cb):
-            cb.setFont(QFont("Helvetica", 9))
+            cb.setFont(QFont("Helvetica", 11))
             lay.addWidget(cb)
 
         lay.addWidget(_sep())
 
         self._adv_btn = QPushButton("[+] Advanced")
         self._adv_btn.setFlat(True)
-        self._adv_btn.setFont(QFont("Helvetica", 9))
+        self._adv_btn.setFont(QFont("Helvetica", 10))
         self._adv_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._adv_btn.clicked.connect(self._toggle_adv)
         lay.addWidget(self._adv_btn)
@@ -1126,17 +1368,18 @@ class ConvertSidebar(QWidget):
         self._adv_widget = QWidget()
         adv_lay = QVBoxLayout(self._adv_widget)
         adv_lay.setContentsMargins(0, 0, 0, 0)
+        adv_lay.setSpacing(6)
 
         def _spin_row(label: str, val: float, mn: float, mx: float):
             row  = QHBoxLayout()
             lbl  = QLabel(label)
-            lbl.setFont(QFont("Helvetica", 8))
-            lbl.setFixedWidth(92)
+            lbl.setFont(QFont("Helvetica", 10))
+            lbl.setFixedWidth(100)
             spin = QDoubleSpinBox()
             spin.setRange(mn, mx)
             spin.setValue(val)
             spin.setSingleStep(0.5)
-            spin.setFont(QFont("Helvetica", 8))
+            spin.setFont(QFont("Helvetica", 10))
             row.addWidget(lbl)
             row.addWidget(spin)
             adv_lay.addLayout(row)
@@ -1150,8 +1393,8 @@ class ConvertSidebar(QWidget):
         lay.addWidget(_sep())
 
         self.run_btn = QPushButton("  RUN  ")
-        self.run_btn.setFont(QFont("Helvetica", 12, QFont.Bold))
-        self.run_btn.setFixedHeight(42)
+        self.run_btn.setFont(QFont("Helvetica", 14, QFont.Bold))
+        self.run_btn.setFixedHeight(48)
         self.run_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.run_btn.setObjectName("accentBtn")
         lay.addWidget(self.run_btn)
@@ -1159,7 +1402,7 @@ class ConvertSidebar(QWidget):
         lay.addWidget(_sep())
 
         self.fcount_lbl = QLabel("")
-        self.fcount_lbl.setFont(QFont("Helvetica", 8))
+        self.fcount_lbl.setFont(QFont("Helvetica", 10))
         self.fcount_lbl.setWordWrap(True)
         lay.addWidget(self.fcount_lbl)
 
@@ -1170,7 +1413,7 @@ class ConvertSidebar(QWidget):
             "The University of Queensland\n"
             "Original code by Rohan Platts"
         )
-        credit.setFont(QFont("Helvetica", 7))
+        credit.setFont(QFont("Helvetica", 9))
         credit.setAlignment(Qt.AlignCenter)
         lay.addWidget(credit)
 
@@ -1209,7 +1452,7 @@ class AboutDialog(QDialog):
                 logo_lbl.setPixmap(pix.scaledToWidth(372, Qt.SmoothTransformation))
             lay.addWidget(logo_lbl)
 
-        def _row(text, size=10, bold=False, sub=False):
+        def _row(text, size=11, bold=False, sub=False):
             lbl = QLabel(text)
             f   = QFont("Helvetica", size)
             f.setBold(bold)
@@ -1220,22 +1463,22 @@ class AboutDialog(QDialog):
                 lbl.setStyleSheet(f"color: {t['sub_fg']};")
             lay.addWidget(lbl)
 
-        _row("ProbeFlow", 15, bold=True)
-        _row("Createc → Nanonis File Conversion", 10, sub=True)
+        _row("ProbeFlow", 16, bold=True)
+        _row("Createc → Nanonis File Conversion", 11, sub=True)
         lay.addWidget(_sep())
-        _row("Developed at SPMQT-Lab", 10, bold=True)
-        _row("Under the supervision of Dr. Peter Jacobson\nThe University of Queensland", 9, sub=True)
+        _row("Developed at SPMQT-Lab", 11, bold=True)
+        _row("Under the supervision of Dr. Peter Jacobson\nThe University of Queensland", 10, sub=True)
         lay.addWidget(_sep())
-        _row("Original code by Rohan Platts", 10, bold=True)
+        _row("Original code by Rohan Platts", 11, bold=True)
         _row("The core conversion algorithms were built by Rohan Platts.\n"
-             "This GUI is a refactored and extended version.", 9, sub=True)
+             "This GUI is a refactored and extended version.", 10, sub=True)
         lay.addWidget(_sep())
 
         gh_btn = QPushButton("View on GitHub")
-        gh_btn.setFont(QFont("Helvetica", 9))
+        gh_btn.setFont(QFont("Helvetica", 11))
         gh_btn.setCursor(QCursor(Qt.PointingHandCursor))
         gh_btn.setObjectName("accentBtn")
-        gh_btn.setFixedHeight(32)
+        gh_btn.setFixedHeight(36)
         gh_btn.clicked.connect(lambda: webbrowser.open(GITHUB_URL))
         lay.addWidget(gh_btn)
 
@@ -1247,34 +1490,34 @@ class Navbar(QWidget):
 
     def __init__(self, dark: bool, parent=None):
         super().__init__(parent)
-        self._dark = dark
+        self._dark    = dark
+        self._btns:   list[QPushButton] = []
         self.setFixedHeight(NAVBAR_H)
-        self.setStyleSheet(f"background-color: {NAVBAR_BG};")
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(6)
 
-        nav_logo_path = LOGO_NAV_PATH if LOGO_NAV_PATH.exists() else None
-        if nav_logo_path:
-            logo_lbl = QLabel()
-            logo_lbl.setStyleSheet("background: transparent;")
-            pix = QPixmap(str(nav_logo_path))
-            logo_lbl.setPixmap(
+        if LOGO_NAV_PATH.exists():
+            self._logo_lbl = QLabel()
+            self._logo_lbl.setStyleSheet("background: transparent;")
+            pix = QPixmap(str(LOGO_NAV_PATH))
+            self._logo_lbl.setPixmap(
                 pix.scaled(9999, 46, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            logo_lbl.setCursor(QCursor(Qt.PointingHandCursor))
-            logo_lbl.mousePressEvent = lambda e: webbrowser.open(GITHUB_URL)
-            lay.addWidget(logo_lbl)
+            self._logo_lbl.setCursor(QCursor(Qt.PointingHandCursor))
+            self._logo_lbl.mousePressEvent = lambda e: webbrowser.open(GITHUB_URL)
+            lay.addWidget(self._logo_lbl)
 
         lay.addStretch()
 
         def _nbtn(text: str, slot) -> QPushButton:
             btn = QPushButton(text)
-            btn.setFont(QFont("Helvetica", 9))
+            btn.setFont(QFont("Helvetica", 11))
             btn.setObjectName("navBtn")
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.clicked.connect(slot)
             lay.addWidget(btn)
+            self._btns.append(btn)
             return btn
 
         self._theme_btn = _nbtn(
@@ -1284,9 +1527,52 @@ class Navbar(QWidget):
         _nbtn("GitHub", lambda: webbrowser.open(GITHUB_URL))
         _nbtn("About",  self.about_clicked.emit)
 
+        self._apply_nav_theme()
+
     def set_dark(self, dark: bool):
         self._dark = dark
         self._theme_btn.setText("Light mode" if dark else "Dark mode")
+        self._apply_nav_theme()
+
+    def _apply_nav_theme(self):
+        if self._dark:
+            self.setStyleSheet(
+                f"background-color: {NAVBAR_DARK_BG};"
+            )
+            btn_qss = """
+                QPushButton {
+                    color: #ffffff;
+                    background-color: transparent;
+                    border: 2px solid rgba(255,255,255,0.6);
+                    border-radius: 4px;
+                    padding: 4px 14px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255,255,255,0.18);
+                }
+            """
+        else:
+            self.setStyleSheet(
+                f"background-color: {NAVBAR_LIGHT_BG};"
+                "border-bottom: 2px solid #b0bec5;"
+            )
+            btn_qss = """
+                QPushButton {
+                    color: #1e1e2e;
+                    background-color: #f0f2f5;
+                    border: 2px solid #b0bec5;
+                    border-radius: 4px;
+                    padding: 4px 14px;
+                }
+                QPushButton:hover {
+                    background-color: #e4edf8;
+                    border-color: #3273dc;
+                }
+            """
+        if hasattr(self, "_logo_lbl"):
+            self._logo_lbl.setStyleSheet("background: transparent;")
+        for btn in self._btns:
+            btn.setStyleSheet(btn_qss)
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -1294,7 +1580,7 @@ class ProbeFlowWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ProbeFlow")
-        self.setMinimumSize(980, 660)
+        self.setMinimumSize(1100, 720)
 
         self._cfg      = load_config()
         self._dark     = self._cfg.get("dark_mode", True)
@@ -1320,15 +1606,15 @@ class ProbeFlowWindow(QMainWindow):
 
         # Tab bar
         self._tab_bar = QWidget()
-        self._tab_bar.setFixedHeight(38)
+        self._tab_bar.setFixedHeight(44)
         tab_lay = QHBoxLayout(self._tab_bar)
         tab_lay.setContentsMargins(0, 0, 0, 0)
         tab_lay.setSpacing(0)
         self._tab_browse  = QPushButton("Browse")
         self._tab_convert = QPushButton("Convert")
         for btn in (self._tab_browse, self._tab_convert):
-            btn.setFont(QFont("Helvetica", 9, QFont.Bold))
-            btn.setFixedHeight(38)
+            btn.setFont(QFont("Helvetica", 11, QFont.Bold))
+            btn.setFixedHeight(44)
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setFlat(True)
             tab_lay.addWidget(btn)
@@ -1354,7 +1640,7 @@ class ProbeFlowWindow(QMainWindow):
 
         # Right: sidebar stack
         self._sidebar_stack   = QStackedWidget()
-        self._sidebar_stack.setFixedWidth(318)
+        self._sidebar_stack.setFixedWidth(350)
         self._browse_sidebar  = BrowseSidebar(t, self._cfg)
         self._convert_sidebar = ConvertSidebar(t, self._cfg)
         self._sidebar_stack.addWidget(self._browse_sidebar)
@@ -1367,6 +1653,7 @@ class ProbeFlowWindow(QMainWindow):
         self._grid.open_folder_requested.connect(self._open_browse_folder)
         self._grid.entry_selected.connect(self._on_entry_select)
         self._grid.selection_changed.connect(self._on_selection_changed)
+        self._grid.view_requested.connect(self._open_viewer)
         self._browse_sidebar.colormap_apply_requested.connect(self._on_apply_colormap)
         self._browse_sidebar.scale_changed.connect(self._on_scale_changed)
         self._convert_sidebar.run_btn.clicked.connect(self._run)
@@ -1374,7 +1661,7 @@ class ProbeFlowWindow(QMainWindow):
 
         # Status bar
         self._status_bar = QStatusBar()
-        self._status_bar.setFont(QFont("Helvetica", 8))
+        self._status_bar.setFont(QFont("Helvetica", 10))
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Open a folder to browse scans")
 
@@ -1412,11 +1699,11 @@ class ProbeFlowWindow(QMainWindow):
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {t['tab_inact']};
-                        color: {t['sub_fg']};
+                        color: {t['fg']};
                         border: none;
                         padding: 0 18px;
                     }}
-                    QPushButton:hover {{ color: {t['fg']}; }}
+                    QPushButton:hover {{ color: {t['accent_bg']}; }}
                 """)
 
     # ── Browse ─────────────────────────────────────────────────────────────────
@@ -1430,18 +1717,16 @@ class ProbeFlowWindow(QMainWindow):
         self._n_loaded = len(entries)
         self._status_bar.showMessage(
             f"Loaded {self._n_loaded} scan(s) — grayscale by default | "
-            "Select + Apply to colorize")
+            "Select + Apply to colorize  |  Double-click to view full size")
         self._browse_sidebar.clear()
 
     def _on_entry_select(self, entry: SxmFile):
         cmap_key = self._grid._card_colormaps.get(entry.stem, DEFAULT_CMAP_KEY)
         self._browse_sidebar.show_entry(entry, cmap_key)
-        idx = next((i for i, e in enumerate(self._grid.get_entries())
-                    if e.stem == entry.stem), 0) + 1
         n_sel = len(self._grid.get_selected())
         self._status_bar.showMessage(
             f"{entry.stem}  |  {entry.Nx}×{entry.Ny} px  |  "
-            f"{n_sel} selected / {self._n_loaded} total")
+            f"{n_sel} selected / {self._n_loaded} total  |  Double-click to view full size")
 
     def _on_selection_changed(self, n_selected: int):
         self._browse_sidebar.update_selection_hint(n_selected)
@@ -1480,6 +1765,12 @@ class ProbeFlowWindow(QMainWindow):
                               if e.stem == primary), None)
                 if entry:
                     self._browse_sidebar._load_channels(entry, cmap_key)
+
+    def _open_viewer(self, entry: SxmFile):
+        t        = THEMES["dark" if self._dark else "light"]
+        cmap_key = self._grid._card_colormaps.get(entry.stem, DEFAULT_CMAP_KEY)
+        dlg      = ImageViewerDialog(entry, self._grid.get_entries(), cmap_key, t, self)
+        dlg.exec()
 
     # ── Convert ────────────────────────────────────────────────────────────────
     def _update_count(self, text: str = ""):
@@ -1546,6 +1837,7 @@ class ProbeFlowWindow(QMainWindow):
         QApplication.instance().setStyleSheet(_build_qss(t))
         self._grid.apply_theme(t)
         self._browse_sidebar.apply_theme(t)
+        self._conv_panel.apply_theme(t)
         self._tab_bar.setStyleSheet(f"background-color: {t['main_bg']};")
         self._update_tab_styles()
 
@@ -1607,7 +1899,7 @@ QPushButton {{
     color: {t['btn_fg']};
     border: none;
     border-radius: 4px;
-    padding: 4px 10px;
+    padding: 5px 12px;
 }}
 QPushButton:hover {{ background-color: {t['sep']}; }}
 QPushButton:disabled {{
@@ -1638,7 +1930,7 @@ QComboBox {{
     color: {t['fg']};
     border: 1px solid {t['sep']};
     border-radius: 3px;
-    padding: 3px 6px;
+    padding: 4px 8px;
     selection-background-color: {t['accent_bg']};
 }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
@@ -1649,13 +1941,18 @@ QComboBox QAbstractItemView {{
     selection-color: {t['accent_fg']};
     border: 1px solid {t['sep']};
     outline: none;
+    font-size: 11pt;
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: 24px;
+    padding: 2px 8px;
 }}
 QLineEdit {{
     background-color: {t['entry_bg']};
     color: {t['fg']};
     border: 1px solid {t['sep']};
     border-radius: 3px;
-    padding: 3px 6px;
+    padding: 4px 8px;
 }}
 QLineEdit:focus {{ border: 1px solid {t['accent_bg']}; }}
 QTextEdit {{
@@ -1672,7 +1969,7 @@ QTableWidget {{
     gridline-color: transparent;
     alternate-background-color: {t['main_bg']};
 }}
-QTableWidget::item {{ padding: 1px 4px; }}
+QTableWidget::item {{ padding: 3px 6px; }}
 QTableWidget::item:selected {{
     background-color: {t['tree_sel']};
     color: {t['fg']};
@@ -1681,7 +1978,7 @@ QHeaderView::section {{
     background-color: {t['tree_head']};
     color: {t['fg']};
     border: none;
-    padding: 4px;
+    padding: 5px 6px;
     font-weight: bold;
 }}
 QScrollBar:vertical {{
@@ -1707,11 +2004,11 @@ QScrollBar::handle:horizontal {{
     min-width: 20px;
 }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-QCheckBox {{ color: {t['fg']}; spacing: 6px; }}
+QCheckBox {{ color: {t['fg']}; spacing: 8px; }}
 QCheckBox::indicator {{
-    width: 14px; height: 14px;
+    width: 16px; height: 16px;
     border: 1px solid {t['sep']};
-    border-radius: 2px;
+    border-radius: 3px;
     background-color: {t['entry_bg']};
 }}
 QCheckBox::indicator:checked {{
@@ -1723,13 +2020,14 @@ QDoubleSpinBox {{
     color: {t['fg']};
     border: 1px solid {t['sep']};
     border-radius: 3px;
-    padding: 2px 4px;
+    padding: 3px 5px;
 }}
 QSplitter::handle {{ background-color: {t['splitter']}; }}
 QStatusBar {{
     background-color: {t['status_bg']};
     color: {t['status_fg']};
     border-top: 1px solid {t['sep']};
+    font-size: 10pt;
 }}
 QDialog {{ background-color: {t['bg']}; color: {t['fg']}; }}
 QFrame[frameShape="4"], QFrame[frameShape="5"] {{
