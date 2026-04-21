@@ -200,6 +200,7 @@ class ThumbnailGrid(tk.Frame):
         self._groups: List[DatGroup] = []
         self._photos: dict = {}
         self._selected: Optional[str] = None
+        self._load_token = object()
 
         self._canvas = tk.Canvas(self, highlightthickness=0, bd=0)
         self._vsb = tk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
@@ -216,20 +217,38 @@ class ThumbnailGrid(tk.Frame):
         self._groups = groups
         self._photos.clear()
         self._selected = None
+        self._load_token = object()   # invalidates any running loader
         self._canvas.delete("all")
-        for g in groups:
-            self._photos[g.stem] = self._make_photo(g.preview)
         self._layout()
+        # Start lazy loading in background
+        token = self._load_token
+        t = threading.Thread(target=self._load_bg, args=(groups, token), daemon=True)
+        t.start()
 
-    def _make_photo(self, path: Optional[Path]) -> Optional[ImageTk.PhotoImage]:
-        if not path or not path.exists():
-            return None
+    def _load_bg(self, groups: List[DatGroup], token) -> None:
+        """Load PIL images in background; push PhotoImage creation to main thread."""
+        for g in groups:
+            if token is not self._load_token:
+                return
+            if not g.preview or not g.preview.exists():
+                continue
+            try:
+                img = Image.open(g.preview).convert("RGB")
+                img.thumbnail((self.IMG_W, self.IMG_H), Image.LANCZOS)
+            except Exception:
+                continue
+            # PhotoImage must be created on main thread
+            self._canvas.after(0, self._place_photo, g.stem, img, token)
+
+    def _place_photo(self, stem: str, img: Image.Image, token) -> None:
+        if token is not self._load_token:
+            return
         try:
-            img = Image.open(path).convert("RGB")
-            img.thumbnail((self.IMG_W, self.IMG_H), Image.LANCZOS)
-            return ImageTk.PhotoImage(img)
+            self._photos[stem] = ImageTk.PhotoImage(img)
         except Exception:
-            return None
+            return
+        # Redraw only the one card that just loaded
+        self._redraw_card(stem)
 
     def _layout(self) -> None:
         cw = self._canvas.winfo_width()
@@ -271,6 +290,44 @@ class ThumbnailGrid(tk.Frame):
         total_rows = max(1, (len(self._groups) + cols - 1) // cols)
         total_h = total_rows * (self.CARD_H + self.GAP) + self.GAP
         self._canvas.configure(scrollregion=(0, 0, cw, max(total_h, 1)))
+        self._canvas.tag_bind("card", "<Button-1>", self._on_click)
+        self._cached_cols = cols
+
+    def _redraw_card(self, stem: str) -> None:
+        """Update a single card in-place once its photo has loaded."""
+        cols = getattr(self, "_cached_cols", 1)
+        t = self._t
+        idx = next((i for i, g in enumerate(self._groups) if g.stem == stem), None)
+        if idx is None:
+            return
+        g = self._groups[idx]
+        row, col = divmod(idx, cols)
+        x0 = col * (self.CARD_W + self.GAP) + self.GAP
+        y0 = row * (self.CARD_H + self.GAP) + self.GAP
+        x1, y1 = x0 + self.CARD_W, y0 + self.CARD_H
+        sel = (stem == self._selected)
+        # Remove old items for this card and redraw
+        self._canvas.delete(f"s:{stem}")
+        self._canvas.create_rectangle(
+            x0, y0, x1, y1,
+            fill=t["card_sel"] if sel else t["card_bg"],
+            outline=t["accent_bg"] if sel else t["sep"],
+            width=2 if sel else 1,
+            tags=("card", f"s:{stem}"),
+        )
+        photo = self._photos.get(stem)
+        if photo:
+            self._canvas.create_image(
+                x0 + self.CARD_W // 2, y0 + self.IMG_H // 2 + 4,
+                image=photo, tags=("card", f"s:{stem}"),
+            )
+        label = stem if len(stem) <= 20 else stem[:18] + ".."
+        self._canvas.create_text(
+            x0 + self.CARD_W // 2, y1 - 11,
+            text=label, font=("Helvetica", 7),
+            fill="#ffffff" if sel else t["card_fg"],
+            tags=("card", f"s:{stem}"),
+        )
         self._canvas.tag_bind("card", "<Button-1>", self._on_click)
 
     def _on_click(self, event: tk.Event) -> None:
