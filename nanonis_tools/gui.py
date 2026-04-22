@@ -1,4 +1,4 @@
-"""ProbeFlow — PySide6 GUI for Createc-to-Nanonis file conversion."""
+"""ProbeFlow — PySide6 GUI for STM scan browsing, processing, and Createc→Nanonis conversion."""
 
 from __future__ import annotations
 
@@ -874,11 +874,14 @@ class ThumbnailGrid(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
     def load(self, entries: list[SxmFile], folder_path: str = ""):
-        self._entries        = entries
-        self._selected       = set()
-        self._primary        = None
-        self._card_colormaps = {}
-        self._load_token     = object()
+        self._entries         = entries
+        self._selected        = set()
+        self._primary         = None
+        self._card_colormaps  = {}
+        self._card_processing = {}
+        self._card_clip       = {}
+        self._history         = {}
+        self._load_token      = object()
 
         if folder_path:
             p = Path(folder_path)
@@ -917,10 +920,13 @@ class ThumbnailGrid(QWidget):
             loader.signals.loaded.connect(self._on_thumb)
             self._pool.start(loader)
 
+    HISTORY_MAX = 30
+
     def set_colormap_for_selection(self, colormap_key: str,
                                     clip_low: float = 1.0,
                                     clip_high: float = 99.0,
-                                    processing: dict = None) -> int:
+                                    processing: dict = None,
+                                    push_history: bool = True) -> int:
         """Apply colormap, scale and optional processing to selected cards. Returns count updated."""
         if not self._selected:
             return 0
@@ -929,12 +935,15 @@ class ThumbnailGrid(QWidget):
             entry = next((e for e in self._entries if e.stem == stem), None)
             card  = self._cards.get(stem)
             if entry and card:
-                # push current state onto undo history
-                prev_cmap = self._card_colormaps.get(stem, DEFAULT_CMAP_KEY)
-                prev_clip = self._card_clip.get(stem, (1.0, 99.0))
-                prev_proc = self._card_processing.get(stem, {})
-                self._history.setdefault(stem, []).append(
-                    (prev_cmap, prev_clip[0], prev_clip[1], dict(prev_proc)))
+                if push_history:
+                    prev_cmap = self._card_colormaps.get(stem, DEFAULT_CMAP_KEY)
+                    prev_clip = self._card_clip.get(stem, (1.0, 99.0))
+                    prev_proc = self._card_processing.get(stem, {})
+                    stack = self._history.setdefault(stem, [])
+                    stack.append((prev_cmap, prev_clip[0], prev_clip[1],
+                                   dict(prev_proc)))
+                    if len(stack) > self.HISTORY_MAX:
+                        del stack[0:len(stack) - self.HISTORY_MAX]
                 # apply new state
                 self._card_colormaps[stem]  = colormap_key
                 self._card_clip[stem]       = (clip_low, clip_high)
@@ -946,6 +955,34 @@ class ThumbnailGrid(QWidget):
                 loader.signals.loaded.connect(self._on_thumb)
                 self._pool.start(loader)
         return len(self._selected)
+
+    def update_clip_for_selection(self, clip_low: float, clip_high: float) -> int:
+        """Re-render selected cards with new clip, preserving their colormap and
+        processing. Does NOT push to undo history (used by live scale slider)."""
+        if not self._selected:
+            return 0
+        token = self._load_token
+        for stem in self._selected:
+            entry = next((e for e in self._entries if e.stem == stem), None)
+            card  = self._cards.get(stem)
+            if entry and card:
+                cmap = self._card_colormaps.get(stem, DEFAULT_CMAP_KEY)
+                proc = self._card_processing.get(stem, {})
+                self._card_clip[stem] = (clip_low, clip_high)
+                loader = ThumbnailLoader(entry, cmap, token,
+                                         ScanCard.IMG_W, ScanCard.IMG_H,
+                                         clip_low, clip_high,
+                                         processing=proc or None)
+                loader.signals.loaded.connect(self._on_thumb)
+                self._pool.start(loader)
+        return len(self._selected)
+
+    def get_card_state(self, stem: str) -> tuple[str, tuple[float, float], dict]:
+        """Return (colormap_key, (clip_low, clip_high), processing_dict) for a stem."""
+        cmap = self._card_colormaps.get(stem, DEFAULT_CMAP_KEY)
+        clip = self._card_clip.get(stem, (1.0, 99.0))
+        proc = self._card_processing.get(stem, {})
+        return cmap, clip, dict(proc)
 
     def undo_last(self, stems: set[str]) -> int:
         """Revert the last applied colormap/clip/processing for the given stems."""
@@ -1120,7 +1157,22 @@ class ImageViewerDialog(QDialog):
         self._raw_arr: Optional[np.ndarray] = None  # for histogram
 
         self._build()
+        self._sync_qproc_from_state()
         self._load_current()
+
+    def _sync_qproc_from_state(self):
+        """Set quick-processing widgets to reflect the initial processing dict."""
+        align = self._processing.get('align_rows')
+        self._qalign_cb.setCurrentIndex(
+            {None: 0, 'median': 1, 'mean': 2}.get(align, 0))
+        bg_order = self._processing.get('bg_order')
+        self._qbg_cb.setCurrentIndex({None: 0, 1: 1, 2: 2}.get(bg_order, 0))
+        sigma = self._processing.get('smooth_sigma')
+        if sigma:
+            self._qsmooth_cb.setCurrentIndex(1)
+            self._qsmooth_sl.setValue(int(sigma))
+        else:
+            self._qsmooth_cb.setCurrentIndex(0)
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self):
@@ -1322,6 +1374,11 @@ class ImageViewerDialog(QDialog):
         save_btn.clicked.connect(self._on_save_png)
         right_lay.addWidget(save_btn)
 
+        self._status_lbl = QLabel("")
+        self._status_lbl.setFont(QFont("Helvetica", 8))
+        self._status_lbl.setWordWrap(True)
+        right_lay.addWidget(self._status_lbl)
+
         right_lay.addStretch()
 
         right_scroll.setWidget(right)
@@ -1448,11 +1505,12 @@ class ImageViewerDialog(QDialog):
         align_map = {0: None, 1: 'median', 2: 'mean'}
         bg_map    = {0: None, 1: 1, 2: 2}
         smooth_i  = self._qsmooth_cb.currentIndex()
-        self._processing = {
-            'align_rows': align_map[self._qalign_cb.currentIndex()],
-            'bg_order':   bg_map[self._qbg_cb.currentIndex()],
+        # merge into existing processing so keys set by the main panel survive
+        self._processing.update({
+            'align_rows':   align_map[self._qalign_cb.currentIndex()],
+            'bg_order':     bg_map[self._qbg_cb.currentIndex()],
             'smooth_sigma': self._qsmooth_sl.value() if smooth_i != 0 else None,
-        }
+        })
         self._load_current()
 
     def _on_save_png(self):
@@ -1464,6 +1522,7 @@ class ImageViewerDialog(QDialog):
             return
         arr = self._raw_arr
         if arr is None:
+            self._status_lbl.setText("No data to save.")
             return
         try:
             _proc.export_png(
@@ -1471,8 +1530,9 @@ class ImageViewerDialog(QDialog):
                 self._clip_low, self._clip_high,
                 lut_fn=lambda key: _get_lut(key),
             )
+            self._status_lbl.setText(f"Saved → {Path(out_path).name}")
         except Exception as exc:
-            self._title_lbl.setText(f"Export error: {exc}")
+            self._status_lbl.setText(f"Export error: {exc}")
 
 
 # ── Browse tool panel (LEFT) ──────────────────────────────────────────────────
@@ -1939,13 +1999,14 @@ class BrowseInfoPanel(QWidget):
         lay.addWidget(self.meta_table, 1)
 
     # ── Public API ─────────────────────────────────────────────────────────────
-    def show_entry(self, entry: SxmFile, colormap_key: str):
+    def show_entry(self, entry: SxmFile, colormap_key: str,
+                    processing: dict = None):
         self.name_lbl.setText(entry.stem)
         self._qi["pixels"].setText(f"{entry.Nx} × {entry.Ny}")
         self._qi["size"].setText(f"{entry.scan_nm:.1f} nm" if entry.scan_nm is not None else "—")
         self._qi["bias"].setText(f"{entry.bias_mv:.0f} mV" if entry.bias_mv is not None else "—")
         self._qi["setp"].setText(f"{entry.current_pa:.1f} pA" if entry.current_pa is not None else "—")
-        self._load_channels(entry, colormap_key)
+        self.load_channels(entry, colormap_key, processing)
         self._load_metadata(entry)
 
     def clear(self):
@@ -1965,8 +2026,9 @@ class BrowseInfoPanel(QWidget):
         self._t = t
         self._filter_meta()
 
-    # ── Internal ───────────────────────────────────────────────────────────────
-    def _load_channels(self, entry: SxmFile, colormap_key: str):
+    # ── Public ─────────────────────────────────────────────────────────────────
+    def load_channels(self, entry: SxmFile, colormap_key: str,
+                       processing: dict = None):
         self._ch_token = object()
         sigs = ChannelSignals()
         sigs.loaded.connect(self._on_ch_loaded)
@@ -1974,8 +2036,12 @@ class BrowseInfoPanel(QWidget):
         for i in range(4):
             loader = ChannelLoader(entry, i, colormap_key,
                                    self._ch_token, 124, 98, sigs,
-                                   self._clip_low, self._clip_high)
+                                   self._clip_low, self._clip_high,
+                                   processing=processing)
             self._pool.start(loader)
+
+    # Back-compat alias used internally
+    _load_channels = load_channels
 
     @Slot(int, QPixmap, object)
     def _on_ch_loaded(self, idx: int, pixmap: QPixmap, token):
@@ -2603,8 +2669,8 @@ class ProbeFlowWindow(QMainWindow):
         self._browse_info.clear()
 
     def _on_entry_select(self, entry: SxmFile):
-        cmap_key = self._grid._card_colormaps.get(entry.stem, DEFAULT_CMAP_KEY)
-        self._browse_info.show_entry(entry, cmap_key)
+        cmap_key, _, proc = self._grid.get_card_state(entry.stem)
+        self._browse_info.show_entry(entry, cmap_key, proc)
         n_sel = len(self._grid.get_selected())
         self._status_bar.showMessage(
             f"{entry.stem}  |  {entry.Nx}×{entry.Ny} px  |  "
@@ -2630,15 +2696,12 @@ class ProbeFlowWindow(QMainWindow):
                 entry = next((e for e in self._grid.get_entries()
                               if e.stem == primary), None)
                 if entry:
-                    self._browse_info._load_channels(entry, cmap_key)
+                    _, _, proc = self._grid.get_card_state(primary)
+                    self._browse_info.load_channels(entry, cmap_key, proc)
 
     def _on_scale_changed(self, clip_low: float, clip_high: float):
-        cmap_key = CMAP_KEY.get(
-            self._browse_tools.cmap_cb.currentText(), DEFAULT_CMAP_KEY)
         self._browse_info.update_clip(clip_low, clip_high)
-        n = self._grid.set_colormap_for_selection(cmap_key,
-                                                   clip_low=clip_low,
-                                                   clip_high=clip_high)
+        n = self._grid.update_clip_for_selection(clip_low, clip_high)
         if n > 0:
             self._status_bar.showMessage(
                 f"Scale: {clip_low:.0f}%–{clip_high:.0f}% on {n} image{'s' if n > 1 else ''}")
@@ -2647,7 +2710,8 @@ class ProbeFlowWindow(QMainWindow):
                 entry = next((e for e in self._grid.get_entries()
                               if e.stem == primary), None)
                 if entry:
-                    self._browse_info._load_channels(entry, cmap_key)
+                    cmap, _, proc = self._grid.get_card_state(primary)
+                    self._browse_info.load_channels(entry, cmap, proc)
 
     def _on_processing_apply(self, cfg: dict):
         clip_low, clip_high = self._browse_tools.get_clip_values()
@@ -2679,6 +2743,12 @@ class ProbeFlowWindow(QMainWindow):
             desc = ", ".join(steps) if steps else "none"
             self._status_bar.showMessage(
                 f"[{desc}] applied to {n} image{'s' if n > 1 else ''}")
+            primary = self._grid.get_primary()
+            if primary:
+                entry = next((e for e in self._grid.get_entries()
+                              if e.stem == primary), None)
+                if entry:
+                    self._browse_info.load_channels(entry, cmap_key, cfg)
 
     def _on_autoclip(self):
         primary = self._grid.get_primary()
@@ -2783,14 +2853,14 @@ class ProbeFlowWindow(QMainWindow):
             self._status_bar.showMessage(f"Export error: {exc}")
 
     def _open_viewer(self, entry: SxmFile):
-        t         = THEMES["dark" if self._dark else "light"]
-        cmap_key  = self._grid._card_colormaps.get(entry.stem, DEFAULT_CMAP_KEY)
-        clip      = self._grid._card_clip.get(entry.stem, (self._browse_tools._clip_low,
-                                                            self._browse_tools._clip_high))
-        proc      = self._grid._card_processing.get(entry.stem, {})
-        dlg       = ImageViewerDialog(entry, self._grid.get_entries(), cmap_key, t, self,
-                                      clip_low=clip[0], clip_high=clip[1],
-                                      processing=proc)
+        t        = THEMES["dark" if self._dark else "light"]
+        cmap_key, clip, proc = self._grid.get_card_state(entry.stem)
+        # fall back to the current slider values if the card has never been styled
+        if entry.stem not in self._grid._card_clip:
+            clip = self._browse_tools.get_clip_values()
+        dlg = ImageViewerDialog(entry, self._grid.get_entries(), cmap_key, t, self,
+                                clip_low=clip[0], clip_high=clip[1],
+                                processing=proc)
         dlg.exec()
 
     # ── Convert ────────────────────────────────────────────────────────────────

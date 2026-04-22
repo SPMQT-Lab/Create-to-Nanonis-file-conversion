@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "probeflow"
 version = "1.2.0"
-description = "ProbeFlow — Createc to Nanonis file conversion. Converts STM .dat files to .sxm format and PNG previews."
+description = "ProbeFlow — STM scan browser, processor, and Createc-to-Nanonis converter. Browse .sxm scans with colormaps, apply line corrections / background subtraction / smoothing / FFT / grain detection, and convert Createc .dat files to Nanonis .sxm + PNG."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
