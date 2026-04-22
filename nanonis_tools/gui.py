@@ -306,14 +306,22 @@ def render_with_processing(
     size:       Optional[tuple] = None,
 ) -> Optional[Image.Image]:
     """
-    Apply the processing pipeline to *arr* then render to a PIL Image.
+    Apply the full processing pipeline to *arr* then render to a PIL Image.
 
-    processing keys (all optional / defaulted):
+    processing keys (all optional):
         remove_bad_lines : bool
+        align_rows       : str | None  — 'median' | 'mean' | 'linear'
         bg_order         : None | 1 | 2
+        facet_level      : bool
+        smooth_sigma     : float | None  — sigma in pixels (Gaussian)
+        edge_method      : str | None   — 'laplacian' | 'log' | 'dog'
+        edge_sigma       : float
+        edge_sigma2      : float
         fft_mode         : None | 'low_pass' | 'high_pass'
-        fft_cutoff       : float  (0.01 – 0.50)
+        fft_cutoff       : float  (0.01–0.50)
         fft_window       : str    ('hanning')
+        grain_threshold  : float | None  — percentile for grain detection
+        grain_above      : bool
     """
     if processing is None:
         processing = {}
@@ -323,9 +331,29 @@ def render_with_processing(
         if processing.get('remove_bad_lines'):
             a = _proc.remove_bad_lines(a)
 
+        align = processing.get('align_rows')
+        if align:
+            a = _proc.align_rows(a, method=align)
+
         bg_order = processing.get('bg_order')
         if bg_order is not None:
             a = _proc.subtract_background(a, order=int(bg_order))
+
+        if processing.get('facet_level'):
+            a = _proc.facet_level(a)
+
+        smooth_sigma = processing.get('smooth_sigma')
+        if smooth_sigma:
+            a = _proc.gaussian_smooth(a, sigma_px=float(smooth_sigma))
+
+        edge_method = processing.get('edge_method')
+        if edge_method:
+            a = _proc.edge_detect(
+                a,
+                method=edge_method,
+                sigma=float(processing.get('edge_sigma', 1.0)),
+                sigma2=float(processing.get('edge_sigma2', 2.0)),
+            )
 
         fft_mode = processing.get('fft_mode')
         if fft_mode is not None:
@@ -346,10 +374,29 @@ def render_with_processing(
         if vmax <= vmin:
             return None
 
-        safe    = np.where(np.isfinite(a), a, vmin).astype(np.float64)
-        u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-        colored = _get_lut(colormap)[u8]
-        img     = Image.fromarray(colored, mode="RGB")
+        # Grain overlay: colour-code labelled regions on top of the image
+        grain_thresh = processing.get('grain_threshold')
+        if grain_thresh is not None:
+            label_map, n_grains, _ = _proc.detect_grains(
+                a,
+                threshold_pct=float(grain_thresh),
+                above=bool(processing.get('grain_above', True)),
+            )
+            safe    = np.where(np.isfinite(a), a, vmin).astype(np.float64)
+            u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+            colored = _get_lut(colormap)[u8].copy()
+            # Tint grain pixels: blend toward red
+            grain_px = label_map > 0
+            colored[grain_px, 0] = np.clip(colored[grain_px, 0].astype(int) // 2 + 128, 0, 255)
+            colored[grain_px, 1] = colored[grain_px, 1] // 3
+            colored[grain_px, 2] = colored[grain_px, 2] // 3
+            img = Image.fromarray(colored, mode="RGB")
+        else:
+            safe    = np.where(np.isfinite(a), a, vmin).astype(np.float64)
+            u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+            colored = _get_lut(colormap)[u8]
+            img     = Image.fromarray(colored, mode="RGB")
+
         if size:
             img.thumbnail(size, Image.LANCZOS)
         return img
@@ -848,6 +895,7 @@ class BrowseToolPanel(QWidget):
     colormap_apply_requested   = Signal(str)
     scale_changed              = Signal(float, float)
     processing_apply_requested = Signal(dict)
+    autoclip_requested         = Signal()
     measure_requested          = Signal()
     export_requested           = Signal()
 
@@ -953,53 +1001,155 @@ class BrowseToolPanel(QWidget):
         proc_lay.setContentsMargins(4, 2, 0, 2)
         proc_lay.setSpacing(4)
 
-        self._rbl_cb = QCheckBox("Remove bad lines")
+        # helper: combo row
+        def _combo_row(label: str, items: list[str]) -> QComboBox:
+            row = QHBoxLayout()
+            lbl = QLabel(label)
+            lbl.setFont(QFont("Helvetica", 8))
+            lbl.setFixedWidth(78)
+            cb = QComboBox()
+            cb.addItems(items)
+            cb.setFont(QFont("Helvetica", 8))
+            row.addWidget(lbl)
+            row.addWidget(cb, 1)
+            proc_lay.addLayout(row)
+            return cb
+
+        # helper: inline slider sub-widget
+        def _sub_slider(label: str, mn: int, mx: int, init: int, fmt="{v}") -> tuple[QWidget, QSlider, QLabel]:
+            w = QWidget()
+            rl = QHBoxLayout(w)
+            rl.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(label)
+            lbl.setFont(QFont("Helvetica", 8))
+            lbl.setFixedWidth(52)
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(mn, mx)
+            sl.setValue(init)
+            val_lbl = QLabel(fmt.format(v=init))
+            val_lbl.setFont(QFont("Helvetica", 8))
+            val_lbl.setFixedWidth(30)
+            sl.valueChanged.connect(lambda v, vl=val_lbl, f=fmt: vl.setText(f.format(v=v)))
+            rl.addWidget(lbl)
+            rl.addWidget(sl, 1)
+            rl.addWidget(val_lbl)
+            return w, sl, val_lbl
+
+        # ── Section: Line corrections ──────────────────────────────────────────
+        sec1 = QLabel("— Line corrections —")
+        sec1.setFont(QFont("Helvetica", 7))
+        sec1.setAlignment(Qt.AlignCenter)
+        proc_lay.addWidget(sec1)
+
+        self._rbl_cb = QCheckBox("Remove bad lines (MAD)")
         self._rbl_cb.setFont(QFont("Helvetica", 8))
         proc_lay.addWidget(self._rbl_cb)
 
-        bg_row = QHBoxLayout()
-        bg_lbl = QLabel("Background:")
-        bg_lbl.setFont(QFont("Helvetica", 8))
-        bg_lbl.setFixedWidth(76)
-        self._bg_combo = QComboBox()
-        self._bg_combo.addItems(["None", "Plane", "Quadratic"])
-        self._bg_combo.setFont(QFont("Helvetica", 8))
-        bg_row.addWidget(bg_lbl)
-        bg_row.addWidget(self._bg_combo, 1)
-        proc_lay.addLayout(bg_row)
+        self._align_combo = _combo_row("Align rows:", ["None", "Median", "Mean", "Linear"])
 
-        fft_row = QHBoxLayout()
-        fft_lbl = QLabel("FFT filter:")
-        fft_lbl.setFont(QFont("Helvetica", 8))
-        fft_lbl.setFixedWidth(76)
-        self._fft_combo = QComboBox()
-        self._fft_combo.addItems(["None", "Low-pass", "High-pass"])
-        self._fft_combo.setFont(QFont("Helvetica", 8))
+        # ── Section: Background ────────────────────────────────────────────────
+        sec2 = QLabel("— Background subtraction —")
+        sec2.setFont(QFont("Helvetica", 7))
+        sec2.setAlignment(Qt.AlignCenter)
+        proc_lay.addWidget(sec2)
+
+        self._bg_combo = _combo_row("Background:", ["None", "Plane", "Quadratic"])
+
+        self._facet_cb = QCheckBox("Facet level (flat-terrace ref)")
+        self._facet_cb.setFont(QFont("Helvetica", 8))
+        proc_lay.addWidget(self._facet_cb)
+
+        # ── Section: Smoothing / Edge ──────────────────────────────────────────
+        sec3 = QLabel("— Smoothing / Edge detection —")
+        sec3.setFont(QFont("Helvetica", 7))
+        sec3.setAlignment(Qt.AlignCenter)
+        proc_lay.addWidget(sec3)
+
+        self._smooth_combo = _combo_row("Smooth:", ["None", "Gaussian"])
+        self._smooth_sigma_w, self._smooth_sigma_sl, _ = _sub_slider(
+            "σ (px):", 1, 20, 1, "{v}")
+        proc_lay.addWidget(self._smooth_sigma_w)
+        self._smooth_sigma_w.setVisible(False)
+        self._smooth_combo.currentIndexChanged.connect(
+            lambda i: self._smooth_sigma_w.setVisible(i != 0))
+
+        self._edge_combo = _combo_row("Edge detect:", ["None", "Laplacian", "LoG", "DoG"])
+        self._edge_sigma_w, self._edge_sigma_sl, _ = _sub_slider(
+            "σ (px):", 1, 20, 1, "{v}")
+        proc_lay.addWidget(self._edge_sigma_w)
+        self._edge_sigma_w.setVisible(False)
+        self._edge_combo.currentIndexChanged.connect(
+            lambda i: self._edge_sigma_w.setVisible(i != 0))
+
+        # ── Section: FFT filter ────────────────────────────────────────────────
+        sec4 = QLabel("— FFT filter —")
+        sec4.setFont(QFont("Helvetica", 7))
+        sec4.setAlignment(Qt.AlignCenter)
+        proc_lay.addWidget(sec4)
+
+        self._fft_combo = _combo_row("FFT filter:", ["None", "Low-pass", "High-pass"])
         self._fft_combo.currentIndexChanged.connect(self._on_fft_mode_changed)
-        fft_row.addWidget(fft_lbl)
-        fft_row.addWidget(self._fft_combo, 1)
-        proc_lay.addLayout(fft_row)
 
-        self._fft_cutoff_widget = QWidget()
-        cutoff_lay = QHBoxLayout(self._fft_cutoff_widget)
-        cutoff_lay.setContentsMargins(0, 0, 0, 0)
-        cutoff_lbl = QLabel("Cutoff:")
-        cutoff_lbl.setFont(QFont("Helvetica", 8))
-        cutoff_lbl.setFixedWidth(46)
-        self._fft_sl = QSlider(Qt.Horizontal)
-        self._fft_sl.setRange(1, 50)
-        self._fft_sl.setValue(10)
-        self._fft_cutoff_lbl = QLabel("10%")
-        self._fft_cutoff_lbl.setFont(QFont("Helvetica", 8))
-        self._fft_cutoff_lbl.setFixedWidth(32)
-        self._fft_sl.valueChanged.connect(lambda v: self._fft_cutoff_lbl.setText(f"{v}%"))
-        cutoff_lay.addWidget(cutoff_lbl)
-        cutoff_lay.addWidget(self._fft_sl, 1)
-        cutoff_lay.addWidget(self._fft_cutoff_lbl)
+        self._fft_cutoff_widget, self._fft_sl, self._fft_cutoff_lbl = _sub_slider(
+            "Cutoff:", 1, 50, 10, "{v}%")
         proc_lay.addWidget(self._fft_cutoff_widget)
         self._fft_cutoff_widget.setVisible(False)
 
-        self._proc_apply_btn = QPushButton("Apply processing")
+        # ── Section: Grain detection ───────────────────────────────────────────
+        sec5 = QLabel("— Grain detection —")
+        sec5.setFont(QFont("Helvetica", 7))
+        sec5.setAlignment(Qt.AlignCenter)
+        proc_lay.addWidget(sec5)
+
+        self._grain_cb = QCheckBox("Detect grains / islands")
+        self._grain_cb.setFont(QFont("Helvetica", 8))
+        proc_lay.addWidget(self._grain_cb)
+
+        self._grain_opts_w = QWidget()
+        grain_opts_lay = QVBoxLayout(self._grain_opts_w)
+        grain_opts_lay.setContentsMargins(4, 0, 0, 0)
+        grain_opts_lay.setSpacing(2)
+
+        thresh_row = QHBoxLayout()
+        thresh_lbl = QLabel("Threshold:")
+        thresh_lbl.setFont(QFont("Helvetica", 8))
+        thresh_lbl.setFixedWidth(64)
+        self._grain_thresh_sl = QSlider(Qt.Horizontal)
+        self._grain_thresh_sl.setRange(10, 90)
+        self._grain_thresh_sl.setValue(50)
+        self._grain_thresh_lbl = QLabel("50%")
+        self._grain_thresh_lbl.setFont(QFont("Helvetica", 8))
+        self._grain_thresh_lbl.setFixedWidth(30)
+        self._grain_thresh_sl.valueChanged.connect(
+            lambda v: self._grain_thresh_lbl.setText(f"{v}%"))
+        thresh_row.addWidget(thresh_lbl)
+        thresh_row.addWidget(self._grain_thresh_sl, 1)
+        thresh_row.addWidget(self._grain_thresh_lbl)
+        grain_opts_lay.addLayout(thresh_row)
+
+        self._grain_above_rb = QRadioButton("Islands (above threshold)")
+        self._grain_below_rb = QRadioButton("Holes (below threshold)")
+        self._grain_above_rb.setFont(QFont("Helvetica", 8))
+        self._grain_below_rb.setFont(QFont("Helvetica", 8))
+        self._grain_above_rb.setChecked(True)
+        grain_opts_lay.addWidget(self._grain_above_rb)
+        grain_opts_lay.addWidget(self._grain_below_rb)
+
+        proc_lay.addWidget(self._grain_opts_w)
+        self._grain_opts_w.setVisible(False)
+        self._grain_cb.toggled.connect(self._grain_opts_w.setVisible)
+
+        # ── Apply + Auto-clip + Measure ────────────────────────────────────────
+        proc_lay.addWidget(_sep())
+
+        self._autoclip_btn = QPushButton("Auto clip (GMM)")
+        self._autoclip_btn.setFont(QFont("Helvetica", 8))
+        self._autoclip_btn.setFixedHeight(26)
+        self._autoclip_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._autoclip_btn.clicked.connect(self.autoclip_requested.emit)
+        proc_lay.addWidget(self._autoclip_btn)
+
+        self._proc_apply_btn = QPushButton("Apply processing to selection")
         self._proc_apply_btn.setFont(QFont("Helvetica", 8))
         self._proc_apply_btn.setFixedHeight(26)
         self._proc_apply_btn.setCursor(QCursor(Qt.PointingHandCursor))
@@ -1061,14 +1211,27 @@ class BrowseToolPanel(QWidget):
         self._fft_cutoff_widget.setVisible(idx != 0)
 
     def _on_proc_apply(self):
-        bg_map  = {0: None, 1: 1, 2: 2}
-        fft_map = {0: None, 1: 'low_pass', 2: 'high_pass'}
+        align_map = {0: None, 1: 'median', 2: 'mean', 3: 'linear'}
+        bg_map    = {0: None, 1: 1, 2: 2}
+        fft_map   = {0: None, 1: 'low_pass', 2: 'high_pass'}
+        edge_map  = {0: None, 1: 'laplacian', 2: 'log', 3: 'dog'}
+        smooth_i  = self._smooth_combo.currentIndex()
+        edge_i    = self._edge_combo.currentIndex()
+        grain_on  = self._grain_cb.isChecked()
         cfg = {
             'remove_bad_lines': self._rbl_cb.isChecked(),
+            'align_rows':       align_map[self._align_combo.currentIndex()],
             'bg_order':         bg_map[self._bg_combo.currentIndex()],
+            'facet_level':      self._facet_cb.isChecked(),
+            'smooth_sigma':     self._smooth_sigma_sl.value() if smooth_i != 0 else None,
+            'edge_method':      edge_map[edge_i],
+            'edge_sigma':       self._edge_sigma_sl.value(),
+            'edge_sigma2':      self._edge_sigma_sl.value() * 2,
             'fft_mode':         fft_map[self._fft_combo.currentIndex()],
             'fft_cutoff':       self._fft_sl.value() / 100.0,
             'fft_window':       'hanning',
+            'grain_threshold':  self._grain_thresh_sl.value() if grain_on else None,
+            'grain_above':      self._grain_above_rb.isChecked(),
         }
         self.processing_apply_requested.emit(cfg)
 
@@ -1730,6 +1893,7 @@ class ProbeFlowWindow(QMainWindow):
         self._browse_tools.colormap_apply_requested.connect(self._on_apply_colormap)
         self._browse_tools.scale_changed.connect(self._on_scale_changed)
         self._browse_tools.processing_apply_requested.connect(self._on_processing_apply)
+        self._browse_tools.autoclip_requested.connect(self._on_autoclip)
         self._browse_tools.measure_requested.connect(self._on_measure_periodicity)
         self._browse_tools.export_requested.connect(self._on_export)
         self._convert_sidebar.run_btn.clicked.connect(self._run)
@@ -1855,15 +2019,45 @@ class ProbeFlowWindow(QMainWindow):
         else:
             steps = []
             if cfg.get('remove_bad_lines'):
-                steps.append("bad lines removed")
+                steps.append("bad lines")
+            if cfg.get('align_rows'):
+                steps.append(f"align({cfg['align_rows']})")
             if cfg.get('bg_order') is not None:
-                steps.append(f"bg order {cfg['bg_order']}")
+                steps.append(f"bg-poly{cfg['bg_order']}")
+            if cfg.get('facet_level'):
+                steps.append("facet-level")
+            if cfg.get('smooth_sigma'):
+                steps.append(f"smooth(σ={cfg['smooth_sigma']}px)")
+            if cfg.get('edge_method'):
+                steps.append(f"edge({cfg['edge_method']})")
             if cfg.get('fft_mode'):
-                steps.append(
-                    f"FFT {cfg['fft_mode']} {cfg.get('fft_cutoff', 0.1)*100:.0f}%")
-            desc = ", ".join(steps) if steps else "no processing"
+                steps.append(f"FFT-{cfg['fft_mode'].replace('_','-')} {cfg.get('fft_cutoff',0.1)*100:.0f}%")
+            if cfg.get('grain_threshold') is not None:
+                steps.append(f"grains@{cfg['grain_threshold']:.0f}%")
+            desc = ", ".join(steps) if steps else "none"
             self._status_bar.showMessage(
-                f"Processing ({desc}) applied to {n} image{'s' if n > 1 else ''}")
+                f"[{desc}] applied to {n} image{'s' if n > 1 else ''}")
+
+    def _on_autoclip(self):
+        primary = self._grid.get_primary()
+        if not primary:
+            self._status_bar.showMessage("Select an image first for auto clip")
+            return
+        entry = next((e for e in self._grid.get_entries() if e.stem == primary), None)
+        if not entry:
+            return
+        arr = read_sxm_plane_raw(entry.path, 0)
+        if arr is None:
+            self._status_bar.showMessage("Could not read scan data for auto clip")
+            return
+        try:
+            clip_low, clip_high = _proc.gmm_autoclip(arr)
+            self._browse_tools._low_slider.setValue(int(round(clip_low)))
+            self._browse_tools._high_slider.setValue(int(round(clip_high)))
+            self._status_bar.showMessage(
+                f"Auto clip: {clip_low:.1f}% – {clip_high:.1f}%")
+        except Exception as exc:
+            self._status_bar.showMessage(f"Auto clip error: {exc}")
 
     def _on_measure_periodicity(self):
         primary = self._grid.get_primary()
