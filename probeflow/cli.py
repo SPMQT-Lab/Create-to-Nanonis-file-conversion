@@ -452,6 +452,424 @@ def _cmd_convert(args) -> int:
     return 0
 
 
+def _pixel_size_m_from_scan(scan) -> float:
+    """Geometric mean pixel size — used as a single-number proxy."""
+    w_m, h_m = scan.scan_range_m
+    Nx, Ny = scan.dims
+    if Nx <= 0 or Ny <= 0 or w_m <= 0 or h_m <= 0:
+        return 0.0
+    return float(np.sqrt((w_m / Nx) * (h_m / Ny)))
+
+
+def _cmd_particles(args) -> int:
+    """Segment bright (or dark, with --invert) particles and print / export."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)",
+                  args.plane, scan.n_planes)
+        return 1
+    px_m = _pixel_size_m_from_scan(scan)
+    if px_m <= 0:
+        log.error("Scan has no physical pixel size — cannot segment.")
+        return 1
+
+    from probeflow.features import segment_particles
+    particles = segment_particles(
+        scan.planes[args.plane],
+        pixel_size_m=px_m,
+        threshold=args.threshold,
+        manual_value=args.manual_value,
+        invert=args.invert,
+        min_area_nm2=args.min_area,
+        max_area_nm2=args.max_area,
+        size_sigma_clip=None if args.no_sigma_clip else args.sigma_clip,
+        clip_low=args.clip_low,
+        clip_high=args.clip_high,
+    )
+
+    if args.output:
+        from probeflow.writers.json import write_json
+        write_json(args.output, particles, kind="particles", scan=scan,
+                   extra_meta={"plane": args.plane, "threshold": args.threshold})
+        log.info("[OK] %d particles → %s", len(particles), args.output)
+    if args.json:
+        import json as _json
+        print(_json.dumps([p.to_dict() for p in particles], indent=2))
+    else:
+        print(f"Detected {len(particles)} particles")
+        for p in particles[:args.limit]:
+            print(f"  #{p.index:4d}  area={p.area_nm2:8.2f} nm²  "
+                  f"centroid=({p.centroid_x_m * 1e9:7.2f},"
+                  f" {p.centroid_y_m * 1e9:7.2f}) nm  "
+                  f"mean_h={p.mean_height: .3e}")
+        if len(particles) > args.limit:
+            print(f"  ... ({len(particles) - args.limit} more)")
+    return 0
+
+
+def _cmd_count(args) -> int:
+    """Count features by cross-correlating with a template image."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)",
+                  args.plane, scan.n_planes)
+        return 1
+    px_m = _pixel_size_m_from_scan(scan)
+    if px_m <= 0:
+        log.error("Scan has no physical pixel size.")
+        return 1
+
+    # Load the template: either a PNG or another scan file.
+    if args.template.suffix.lower() == ".png":
+        tmpl = np.asarray(Image.open(args.template).convert("L"),
+                          dtype=np.float64)
+    else:
+        tscan = load_scan(args.template)
+        tmpl = tscan.planes[0]
+
+    from probeflow.features import count_features
+    dets = count_features(
+        scan.planes[args.plane], tmpl,
+        pixel_size_m=px_m,
+        min_correlation=args.min_corr,
+        min_distance_m=args.min_distance * 1e-9 if args.min_distance else None,
+        clip_low=args.clip_low,
+        clip_high=args.clip_high,
+    )
+
+    if args.output:
+        from probeflow.writers.json import write_json
+        write_json(args.output, dets, kind="detections", scan=scan,
+                   extra_meta={"template": str(args.template),
+                               "min_correlation": args.min_corr})
+        log.info("[OK] %d detections → %s", len(dets), args.output)
+    if args.json:
+        import json as _json
+        print(_json.dumps([d.to_dict() for d in dets], indent=2))
+    else:
+        print(f"Detected {len(dets)} features")
+        mean_corr = float(np.mean([d.correlation for d in dets])) if dets else 0.0
+        print(f"Mean correlation: {mean_corr:.3f}")
+    return 0
+
+
+def _cmd_tv_denoise(args) -> int:
+    """Apply total-variation denoising and write a new .sxm (or PNG)."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)",
+                  args.plane, scan.n_planes)
+        return 1
+    scan.planes[args.plane] = _proc.tv_denoise(
+        scan.planes[args.plane],
+        method=args.method,
+        lam=args.lam,
+        alpha=args.alpha,
+        tau=args.tau,
+        max_iter=args.max_iter,
+        nabla_comp=args.nabla_comp,
+    )
+    _write_output(args, scan, default_suffix="_tv.sxm")
+    return 0
+
+
+def _cmd_lattice(args) -> int:
+    """Extract primitive lattice vectors and (optionally) write a PDF report."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)",
+                  args.plane, scan.n_planes)
+        return 1
+    px_m = _pixel_size_m_from_scan(scan)
+    if px_m <= 0:
+        log.error("Scan has no physical pixel size.")
+        return 1
+
+    from probeflow.lattice import (
+        LatticeParams, extract_lattice, write_lattice_pdf,
+    )
+    params = LatticeParams(
+        contrast_threshold=args.contrast_threshold,
+        sigma=args.sigma,
+        cluster_kp_low=args.cluster_kp_low,
+        cluster_kp_high=args.cluster_kp_high,
+        cluster_kNN_low=args.cluster_knn_low,
+        cluster_kNN_high=args.cluster_knn_high,
+    )
+    try:
+        res = extract_lattice(scan.planes[args.plane], pixel_size_m=px_m,
+                              params=params)
+    except Exception as exc:
+        log.error("Lattice extraction failed: %s", exc)
+        return 1
+
+    if args.output:
+        suffix = args.output.suffix.lower()
+        if suffix == ".pdf":
+            write_lattice_pdf(scan, res, args.output, plane_idx=args.plane,
+                              colormap=args.colormap,
+                              clip_low=args.clip_low, clip_high=args.clip_high)
+        else:
+            from probeflow.writers.json import write_json
+            write_json(args.output, [res], kind="lattice", scan=scan,
+                       extra_meta={"plane": args.plane})
+        log.info("[OK] lattice result → %s", args.output)
+
+    if args.json:
+        import json as _json
+        print(_json.dumps(res.to_dict(), indent=2))
+    else:
+        print(f"|a| = {res.a_length_m * 1e9:7.3f} nm")
+        print(f"|b| = {res.b_length_m * 1e9:7.3f} nm")
+        print(f" γ  = {res.gamma_deg:7.2f} °")
+        print(f"Keypoints: {res.n_keypoints}  (primary cluster: "
+              f"{res.n_keypoints_used})")
+    return 0
+
+
+def _cmd_classify(args) -> int:
+    """Classify segmented particles against labelled samples in a JSON file."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)",
+                  args.plane, scan.n_planes)
+        return 1
+    px_m = _pixel_size_m_from_scan(scan)
+    if px_m <= 0:
+        log.error("Scan has no physical pixel size.")
+        return 1
+
+    from probeflow.features import (
+        Particle, segment_particles, classify_particles,
+    )
+    arr = scan.planes[args.plane]
+
+    particles = segment_particles(
+        arr, pixel_size_m=px_m,
+        min_area_nm2=args.min_area,
+        size_sigma_clip=None if args.no_sigma_clip else args.sigma_clip,
+    )
+
+    # Samples file: JSON produced from `probeflow particles` (or hand-crafted).
+    import json as _json
+    samples_data = _json.loads(Path(args.samples).read_text(encoding="utf-8"))
+    if isinstance(samples_data, dict) and "items" in samples_data:
+        samples_data = samples_data["items"]
+    samples: list[tuple[str, Particle]] = []
+    for entry in samples_data:
+        name = entry.get("class_name") or entry.get("label") or "sample"
+        p = Particle(**{k: v for k, v in entry.items()
+                        if k in Particle.__dataclass_fields__})
+        samples.append((name, p))
+
+    classifs = classify_particles(
+        arr, particles, samples,
+        encoder=args.encoder,
+        threshold_method=args.threshold_method,
+    )
+
+    if args.output:
+        from probeflow.writers.json import write_json
+        write_json(args.output, classifs, kind="classifications", scan=scan,
+                   extra_meta={"encoder": args.encoder,
+                               "threshold_method": args.threshold_method})
+        log.info("[OK] %d classifications → %s", len(classifs), args.output)
+
+    # Summary counts per class
+    counts: dict = {}
+    for c in classifs:
+        counts[c.class_name] = counts.get(c.class_name, 0) + 1
+    if args.json:
+        print(_json.dumps(counts, indent=2))
+    else:
+        for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {name:20s}  {n}")
+    return 0
+
+
+def _cmd_profile(args) -> int:
+    """Sample z-values along a straight segment and write a CSV / PNG / JSON."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)", args.plane, scan.n_planes)
+        return 1
+
+    arr = scan.planes[args.plane]
+    Ny, Nx = arr.shape
+    w_m, h_m = scan.scan_range_m
+    px_x = w_m / Nx if Nx > 0 and w_m > 0 else 1e-10
+    px_y = h_m / Ny if Ny > 0 and h_m > 0 else 1e-10
+
+    # Endpoints: --p0 and --p1 in pixels, OR --p0-nm / --p1-nm in nanometres.
+    if args.p0_nm is not None and args.p1_nm is not None:
+        p0 = (args.p0_nm[0] * 1e-9 / px_x, args.p0_nm[1] * 1e-9 / px_y)
+        p1 = (args.p1_nm[0] * 1e-9 / px_x, args.p1_nm[1] * 1e-9 / px_y)
+    elif args.p0 is not None and args.p1 is not None:
+        p0 = tuple(args.p0)
+        p1 = tuple(args.p1)
+    else:
+        log.error("Provide either --p0/--p1 (px) or --p0-nm/--p1-nm")
+        return 1
+
+    s_m, z = _proc.line_profile(
+        arr, p0, p1,
+        pixel_size_x_m=px_x, pixel_size_y_m=px_y,
+        n_samples=args.n_samples,
+        width_px=args.width,
+        interp=args.interp,
+    )
+
+    if args.output is None:
+        for s, zi in zip(s_m, z):
+            print(f"{s:.6e}\t{zi:.6e}")
+        return 0
+
+    suffix = args.output.suffix.lower()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".csv":
+        with args.output.open("w", encoding="utf-8") as f:
+            f.write("# distance_m\tz\n")
+            for s, zi in zip(s_m, z):
+                f.write(f"{s:.6e}\t{zi:.6e}\n")
+    elif suffix == ".json":
+        from probeflow.writers.json import write_json
+
+        class _Sample:
+            __dataclass_fields__ = {"distance_m": None, "z": None}
+
+            def __init__(self, distance_m, z):
+                self.distance_m = float(distance_m)
+                self.z = float(z)
+
+            def to_dict(self):
+                return {"distance_m": self.distance_m, "z": self.z}
+
+        items = [_Sample(s, zi) for s, zi in zip(s_m, z)]
+        write_json(args.output, items, kind="line_profile", scan=scan,
+                   extra_meta={"plane": args.plane,
+                               "p0_px": list(p0), "p1_px": list(p1),
+                               "width_px": args.width})
+    elif suffix == ".png":
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(7, 3.2), dpi=150)
+        ax.plot(s_m * 1e9, z, lw=1.2)
+        ax.set_xlabel("Distance along profile (nm)")
+        ax.set_ylabel(f"{scan.plane_names[args.plane]} ({scan.plane_units[args.plane]})")
+        ax.set_title(f"{scan.source_path.name} — plane {args.plane}")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(str(args.output))
+        import matplotlib.pyplot as _plt
+        _plt.close(fig)
+    else:
+        log.error("Unsupported output suffix %r — use .csv / .json / .png", suffix)
+        return 1
+    log.info("[OK] %d samples → %s", len(s_m), args.output)
+    return 0
+
+
+def _cmd_unit_cell(args) -> int:
+    """Extract lattice, then average all unit cells into one canonical motif."""
+    setup_logging(args.verbose)
+    try:
+        scan = load_scan(args.input)
+    except Exception as exc:
+        log.error("Could not load %s: %s", args.input, exc)
+        return 1
+    if args.plane >= scan.n_planes:
+        log.error("Plane %d not present (file has %d)", args.plane, scan.n_planes)
+        return 1
+    px_m = _pixel_size_m_from_scan(scan)
+    if px_m <= 0:
+        log.error("Scan has no physical pixel size.")
+        return 1
+
+    from probeflow.lattice import (
+        LatticeParams, extract_lattice, average_unit_cell,
+    )
+    arr = scan.planes[args.plane]
+    try:
+        lat = extract_lattice(arr, pixel_size_m=px_m, params=LatticeParams())
+    except Exception as exc:
+        log.error("Lattice extraction failed: %s", exc)
+        return 1
+    try:
+        cell = average_unit_cell(arr, lat,
+                                 oversample=args.oversample,
+                                 border_margin_px=args.border_margin)
+    except Exception as exc:
+        log.error("Unit-cell averaging failed: %s", exc)
+        return 1
+
+    print(f"Averaged {cell.n_cells} unit cell(s)")
+    print(f"Cell size:  {cell.cell_size_px[1]} × {cell.cell_size_px[0]} px  "
+          f"({cell.cell_size_m[1] * 1e9:.3f} × {cell.cell_size_m[0] * 1e9:.3f} nm)")
+    print(f"|a|={lat.a_length_m * 1e9:.3f} nm   "
+          f"|b|={lat.b_length_m * 1e9:.3f} nm   γ={lat.gamma_deg:.2f}°")
+
+    if args.output is None:
+        return 0
+    suffix = args.output.suffix.lower()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".png":
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+        finite = cell.avg_cell[np.isfinite(cell.avg_cell)]
+        vmin = float(np.percentile(finite, args.clip_low)) if finite.size else 0.0
+        vmax = float(np.percentile(finite, args.clip_high)) if finite.size else 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        fig, ax = plt.subplots(figsize=(4, 4), dpi=180)
+        ax.imshow(cell.avg_cell, cmap=args.colormap, vmin=vmin, vmax=vmax,
+                  interpolation="nearest", origin="upper")
+        ax.set_axis_off()
+        ax.set_title(f"avg of {cell.n_cells} cells", fontsize=9)
+        fig.tight_layout()
+        fig.savefig(str(args.output))
+        import matplotlib.pyplot as _plt
+        _plt.close(fig)
+    elif suffix in (".npy",):
+        np.save(str(args.output), cell.avg_cell)
+    else:
+        log.error("Unsupported output suffix %r — use .png or .npy", suffix)
+        return 1
+    log.info("[OK] unit cell → %s", args.output)
+    return 0
+
+
 def _cmd_dat2sxm(args) -> int:
     from probeflow.dat_sxm import main as _main
     forwarded = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
@@ -712,6 +1130,150 @@ def _build_parser() -> argparse.ArgumentParser:
     period.add_argument("--json", action="store_true")
     period.add_argument("--verbose", action="store_true")
     period.set_defaults(func=_cmd_periodicity)
+
+    # ── Phase-3: features / counting / lattice / denoise / classify ──
+    particles = sub.add_parser("particles",
+        help="Segment bright (or dark) particles / molecules on a scan plane")
+    particles.add_argument("input", type=Path)
+    particles.add_argument("-o", "--output", type=Path, default=None,
+        help="Optional .json output with full particle list + scan provenance")
+    particles.add_argument("--plane", type=int, default=0)
+    particles.add_argument("--threshold", choices=("otsu", "manual", "adaptive"),
+                           default="otsu")
+    particles.add_argument("--manual-value", type=float, default=None,
+        help="0-255 byte cutoff when --threshold=manual")
+    particles.add_argument("--invert", action="store_true",
+        help="Segment depressions instead of bright features")
+    particles.add_argument("--min-area", type=float, default=0.5,
+        help="Minimum particle area (nm²; default 0.5)")
+    particles.add_argument("--max-area", type=float, default=None,
+        help="Maximum particle area (nm²; default: no limit)")
+    particles.add_argument("--sigma-clip", type=float, default=2.0,
+        help="Drop particles more than this many σ from the mean area")
+    particles.add_argument("--no-sigma-clip", action="store_true",
+        help="Disable σ-clipping of particle areas")
+    particles.add_argument("--clip-low", type=float, default=1.0)
+    particles.add_argument("--clip-high", type=float, default=99.0)
+    particles.add_argument("--limit", type=int, default=20,
+        help="Max particles printed to stdout (table mode)")
+    particles.add_argument("--json", action="store_true")
+    particles.add_argument("--verbose", action="store_true")
+    particles.set_defaults(func=_cmd_particles)
+
+    count = sub.add_parser("count",
+        help="Count features by template matching (AiSurf atom_counting)")
+    count.add_argument("input", type=Path)
+    count.add_argument("--template", type=Path, required=True,
+        help="Template image — PNG or another scan file")
+    count.add_argument("-o", "--output", type=Path, default=None,
+        help="Optional .json output with all detections")
+    count.add_argument("--plane", type=int, default=0)
+    count.add_argument("--min-corr", type=float, default=0.5,
+        help="Minimum normalised cross-correlation (0.4-0.6 typical)")
+    count.add_argument("--min-distance", type=float, default=None,
+        help="Minimum feature separation (nm); default = half template side")
+    count.add_argument("--clip-low", type=float, default=1.0)
+    count.add_argument("--clip-high", type=float, default=99.0)
+    count.add_argument("--json", action="store_true")
+    count.add_argument("--verbose", action="store_true")
+    count.set_defaults(func=_cmd_count)
+
+    tv = sub.add_parser("tv-denoise",
+        help="Total-variation denoising (Huber-ROF / TV-L1)")
+    _add_common_io(tv, out_suffix="_tv.sxm")
+    tv.add_argument("--method", choices=("huber_rof", "tv_l1"),
+                    default="huber_rof")
+    tv.add_argument("--lam", type=float, default=0.05,
+                    help="Data-fidelity weight (higher = closer to input)")
+    tv.add_argument("--alpha", type=float, default=0.05,
+                    help="Huber smoothing parameter (huber_rof only)")
+    tv.add_argument("--tau", type=float, default=0.25)
+    tv.add_argument("--max-iter", type=int, default=500)
+    tv.add_argument("--nabla-comp", choices=("both", "x", "y"),
+                    default="both",
+                    help="'x' removes vertical scratches; 'y' removes horizontal")
+    tv.set_defaults(func=_cmd_tv_denoise)
+
+    lat = sub.add_parser("lattice",
+        help="SIFT-based primitive lattice vector extraction")
+    lat.add_argument("input", type=Path)
+    lat.add_argument("-o", "--output", type=Path, default=None,
+        help="Optional output — .pdf for a report, .json for raw numbers")
+    lat.add_argument("--plane", type=int, default=0)
+    lat.add_argument("--contrast-threshold", type=float, default=0.003)
+    lat.add_argument("--sigma", type=float, default=4.0)
+    lat.add_argument("--cluster-kp-low", type=int, default=2)
+    lat.add_argument("--cluster-kp-high", type=int, default=12)
+    lat.add_argument("--cluster-knn-low", type=int, default=6)
+    lat.add_argument("--cluster-knn-high", type=int, default=24)
+    lat.add_argument("--colormap", default="gray")
+    lat.add_argument("--clip-low", type=float, default=1.0)
+    lat.add_argument("--clip-high", type=float, default=99.0)
+    lat.add_argument("--json", action="store_true")
+    lat.add_argument("--verbose", action="store_true")
+    lat.set_defaults(func=_cmd_lattice)
+
+    classify = sub.add_parser("classify",
+        help="Few-shot classify particles against labelled samples")
+    classify.add_argument("input", type=Path)
+    classify.add_argument("--samples", type=Path, required=True,
+        help="JSON file with sample particles (each object must include "
+             "'class_name' / 'label' and all Particle fields)")
+    classify.add_argument("-o", "--output", type=Path, default=None)
+    classify.add_argument("--plane", type=int, default=0)
+    classify.add_argument("--encoder", choices=("raw", "pca_kmeans"),
+                          default="raw")
+    classify.add_argument("--threshold-method",
+                          choices=("gmm", "otsu", "distribution"),
+                          default="gmm")
+    classify.add_argument("--min-area", type=float, default=0.5)
+    classify.add_argument("--sigma-clip", type=float, default=2.0)
+    classify.add_argument("--no-sigma-clip", action="store_true")
+    classify.add_argument("--json", action="store_true")
+    classify.add_argument("--verbose", action="store_true")
+    classify.set_defaults(func=_cmd_classify)
+
+    # ── line profile ──
+    profile = sub.add_parser("profile",
+        help="Sample z along a straight segment (CSV / JSON / PNG output)")
+    profile.add_argument("input", type=Path)
+    profile.add_argument("-o", "--output", type=Path, default=None,
+        help="Output suffix selects format: .csv | .json | .png. "
+             "Omit for tab-separated stdout.")
+    profile.add_argument("--plane", type=int, default=0)
+    profile.add_argument("--p0", type=float, nargs=2, metavar=("X", "Y"),
+        help="Start point in pixel coordinates")
+    profile.add_argument("--p1", type=float, nargs=2, metavar=("X", "Y"),
+        help="End point in pixel coordinates")
+    profile.add_argument("--p0-nm", type=float, nargs=2, metavar=("X", "Y"),
+        help="Start point in nanometres (alternative to --p0)")
+    profile.add_argument("--p1-nm", type=float, nargs=2, metavar=("X", "Y"),
+        help="End point in nanometres (alternative to --p1)")
+    profile.add_argument("--n-samples", type=int, default=None,
+        help="Sample count (default: ceil of pixel length + 1)")
+    profile.add_argument("--width", type=float, default=1.0,
+        help="Perpendicular swath width in pixels (averages across; default 1)")
+    profile.add_argument("--interp", choices=("linear", "nearest"),
+        default="linear")
+    profile.add_argument("--verbose", action="store_true")
+    profile.set_defaults(func=_cmd_profile)
+
+    # ── unit-cell averaging ──
+    ucell = sub.add_parser("unit-cell",
+        help="Extract lattice and average all unit cells into a canonical motif")
+    ucell.add_argument("input", type=Path)
+    ucell.add_argument("-o", "--output", type=Path, default=None,
+        help="Output suffix selects format: .png (image) or .npy (raw array)")
+    ucell.add_argument("--plane", type=int, default=0)
+    ucell.add_argument("--oversample", type=float, default=1.5,
+        help="Output pixel count is oversample × max(|a|, |b|) per side")
+    ucell.add_argument("--border-margin", type=int, default=4,
+        help="Skip lattice sites within this many pixels of the image border")
+    ucell.add_argument("--colormap", default="gray")
+    ucell.add_argument("--clip-low", type=float, default=1.0)
+    ucell.add_argument("--clip-high", type=float, default=99.0)
+    ucell.add_argument("--verbose", action="store_true")
+    ucell.set_defaults(func=_cmd_unit_cell)
 
     # ── pipeline ──
     pipe = sub.add_parser("pipeline",

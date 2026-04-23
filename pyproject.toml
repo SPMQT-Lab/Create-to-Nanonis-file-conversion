@@ -21,7 +21,8 @@ dev       = ["pytest"]
 omicron   = ["access2thematrix"]
 rhk       = ["spym"]
 gwyddion  = ["gwyfile"]
-all       = ["access2thematrix", "spym", "gwyfile"]
+features  = ["opencv-python", "scikit-learn"]
+all       = ["access2thematrix", "spym", "gwyfile", "opencv-python", "scikit-learn"]
 
 [project.scripts]
 probeflow = "probeflow.cli:main"

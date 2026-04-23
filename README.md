@@ -24,6 +24,8 @@ Since **v1.4** all topography commands (`plane-bg`, `align-rows`, `smooth`, `sxm
 
 Since **v1.5** ProbeFlow also reads **Gwyddion `.gwy`**, **RHK `.sm4`**, and **Omicron Matrix `.mtrx`** (via optional extras), and writes **PDF**, **TIFF**, **GWY**, and **CSV** in addition to `.sxm` / `.png`.  The `probeflow convert` subcommand is a one-shot any-in/any-out converter driven purely by file suffixes.
 
+Since **v1.6** ProbeFlow adds a **Features tab** (and CLI counterparts) for discrete-object STM analysis: particle / molecule **segmentation**, **template-match counting**, few-shot **classification**, **SIFT lattice extraction**, **unit-cell averaging**, **line profiles**, and **TV denoising**. When the `gwyddion` system binary is on `PATH`, an automatic **Gwyddion bridge** falls back to its converter for any vendor format Gwyddion knows (Bruker, Park, NTEGRA, Nanoscope, …) — no extra Python dependency required.
+
 ---
 
 ## Installation
@@ -36,12 +38,13 @@ python -m pip install -e .
 
 Python 3.11+ is required. The install pulls in `numpy`, `scipy`, `pillow`, `matplotlib`, and `PySide6`.
 
-**Optional extras** for vendor-specific formats:
+**Optional extras** for vendor-specific formats and feature-detection:
 
 ```bash
 pip install probeflow[omicron]    # Omicron Matrix (.mtrx)   via access2thematrix
 pip install probeflow[rhk]        # RHK             (.sm4)   via spym
 pip install probeflow[gwyddion]   # Gwyddion        (.gwy)   via gwyfile
+pip install probeflow[features]   # particles / lattice / count / classify  (cv2 + sklearn)
 pip install probeflow[all]        # everything above
 ```
 
@@ -96,7 +99,7 @@ Legacy shortcuts `dat-sxm` and `dat-png` remain available for backward compatibi
 
 Reads any supported scan format and writes any supported output, picking both ends from file suffixes.
 
-**Read:** `.sxm` · `.dat` · `.gwy` · `.sm4` · `.mtrx` (or `.Z_mtrx` / `.I_mtrx`)
+**Read:** `.sxm` · `.dat` · `.gwy` · `.sm4` · `.mtrx` (or `.Z_mtrx` / `.I_mtrx`).  Any other suffix is automatically routed through the system `gwyddion` binary (if installed), which adds Bruker, Park, NTEGRA, Nanoscope, JPK and the rest of Gwyddion's ~40 vendor formats.
 **Write:** `.sxm` · `.png` · `.pdf` · `.tif` / `.tiff` · `.gwy` · `.csv`
 
 ```bash
@@ -144,6 +147,38 @@ Common options across the processing commands:
 | `autoclip`    | Suggest GMM-based clip percentiles for display                        |
 | `periodicity` | Find dominant spatial periods via the power spectrum                  |
 | `info`        | Print header metadata (`--json` for machine-readable output)          |
+| `profile`     | Sample z along a line (CSV / JSON / PNG; supports nm and px endpoints, swath averaging) |
+
+### Feature detection (requires `probeflow[features]`)
+
+| Command      | Purpose                                                                                |
+|--------------|----------------------------------------------------------------------------------------|
+| `particles`  | Segment bright (or `--invert` for dark) molecules / islands; areas in nm² + centroids  |
+| `count`      | Count repeated motifs by NCC template matching (AiSurf `atom_counting`)                |
+| `classify`   | Few-shot classify particles against labelled samples (raw or PCA encoders, no CLIP)    |
+| `lattice`    | SIFT-based primitive lattice vectors `(a, b, γ)`; optional 4-panel PDF report          |
+| `unit-cell`  | Run `lattice`, then average all interior unit cells into a single canonical motif      |
+| `tv-denoise` | Edge-preserving Chambolle–Pock TV (`huber_rof` or `tv_l1`); axis-selective for scratches |
+
+```bash
+# Count molecules in an .sxm scan; export per-particle JSON.
+probeflow particles scan.sxm --threshold otsu --min-area 0.5 -o particles.json
+
+# Count atoms by template matching; --template can be a PNG crop or another scan.
+probeflow count scan.sxm --template motif.png --min-corr 0.55 -o atoms.json
+
+# SIFT lattice extraction with a 4-panel PDF report.
+probeflow lattice scan.sxm -o lattice.pdf
+
+# Average all unit cells into one clean motif.
+probeflow unit-cell scan.sxm -o avg_cell.png --oversample 1.5
+
+# Total-variation denoising (axis-selective gradient kills horizontal scratches).
+probeflow tv-denoise scan.sxm --method huber_rof --lam 0.05 --nabla-comp y -o clean.sxm
+
+# Line profile across an atomic step, with a 5-pixel swath average, in nm units.
+probeflow profile scan.sxm --p0-nm 0 5 --p1-nm 30 5 --width 5 -o step.png
+```
 
 ### Chain several steps: `pipeline`
 
@@ -305,11 +340,15 @@ probeflow/              # installable package
 ├── dat_sxm.py          # Createc .dat → Nanonis .sxm
 ├── dat_png.py          # Createc .dat → PNG previews
 ├── sxm_io.py           # .sxm read / write (GUI-free)
-├── processing.py       # image-processing pipeline (GUI-free)
+├── processing.py       # image-processing pipeline (GUI-free) — incl. tv_denoise, line_profile
+├── features.py         # particle segmentation / template counting / few-shot classify (GUI-free)
+├── lattice.py          # SIFT lattice extraction + unit-cell averaging (GUI-free)
 ├── spec_io.py          # Createc .VERT reader → SpecData (GUI-free)
 ├── spec_processing.py  # spectroscopy processing functions (GUI-free)
 ├── spec_plot.py        # spectroscopy matplotlib plots (GUI-free)
-├── gui.py              # PySide6 desktop interface
+├── readers/            # vendor format readers (sxm, dat, gwy, sm4, mtrx, gwy_bridge)
+├── writers/            # output writers (sxm, png, pdf, tiff, gwy, csv, json)
+├── gui.py              # PySide6 desktop interface (Browse / Convert / Features tabs)
 └── cli.py              # unified "probeflow" command
 
 src/file_cushions/      # binary layout captured from a reference .sxm file

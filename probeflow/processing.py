@@ -743,3 +743,237 @@ def export_png(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(str(out_path), format="PNG")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 12.  tv_denoise  (Chambolle–Pock primal-dual, ported from AiSurf)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _nabla_apply(x: np.ndarray, Ny: int, Nx: int, comp: str) -> np.ndarray:
+    """Forward gradient (periodic-edge) for TV methods.
+
+    Returns a flattened (2*N,) vector with the x- and y-gradient stacked.
+    """
+    img = x.reshape(Ny, Nx)
+    if comp in ("both", "x"):
+        gx = np.zeros_like(img)
+        gx[:, :-1] = img[:, 1:] - img[:, :-1]
+    else:
+        gx = np.zeros_like(img)
+    if comp in ("both", "y"):
+        gy = np.zeros_like(img)
+        gy[:-1, :] = img[1:, :] - img[:-1, :]
+    else:
+        gy = np.zeros_like(img)
+    return np.concatenate([gx.ravel(), gy.ravel()])
+
+
+def _nabla_T_apply(p: np.ndarray, Ny: int, Nx: int, comp: str) -> np.ndarray:
+    """Adjoint of the forward gradient (negative divergence)."""
+    N = Ny * Nx
+    px = p[:N].reshape(Ny, Nx)
+    py = p[N:].reshape(Ny, Nx)
+
+    div = np.zeros((Ny, Nx))
+    if comp in ("both", "x"):
+        # x-component of -div
+        d = np.zeros_like(px)
+        d[:, 0] = px[:, 0]
+        d[:, 1:-1] = px[:, 1:-1] - px[:, :-2]
+        d[:, -1] = -px[:, -2]
+        div -= d
+    if comp in ("both", "y"):
+        d = np.zeros_like(py)
+        d[0, :] = py[0, :]
+        d[1:-1, :] = py[1:-1, :] - py[:-2, :]
+        d[-1, :] = -py[-2, :]
+        div -= d
+    return div.ravel()
+
+
+def tv_denoise(
+    arr: np.ndarray,
+    *,
+    method: str = "huber_rof",
+    lam: float = 0.05,
+    alpha: float = 0.05,
+    tau: float = 0.25,
+    max_iter: int = 500,
+    tol: float = 5e-6,
+    nabla_comp: str = "both",
+) -> np.ndarray:
+    """Edge-preserving total-variation denoising.
+
+    Two variants are available, ported from AiSurf:
+
+    * ``"huber_rof"``  — Huber-ROF (smooth TV). Good general-purpose default;
+      preserves terraces without staircasing.
+    * ``"tv_l1"``      — Isotropic TV-L1. More aggressive on impulsive noise,
+      but staircases on gently curved terraces.
+
+    Parameters
+    ----------
+    arr
+        2-D float input (any range — no prior normalisation required).
+    method
+        ``"huber_rof"`` | ``"tv_l1"``.
+    lam
+        Data-fidelity weight λ. Larger values stay closer to the input.
+    alpha
+        Huber smoothing parameter (ignored for ``tv_l1``). Typical 0.01–0.1.
+    tau
+        Primal step size. Default 0.25 satisfies the Chambolle-Pock
+        convergence condition ``τ·σ·L² ≤ 1`` (L = √8 here).
+    max_iter
+        Hard cap on iterations.
+    tol
+        RMSE convergence threshold between primal iterates (checked every 50).
+    nabla_comp
+        ``"both"`` (isotropic, default), ``"x"`` (removes vertical scratches),
+        or ``"y"`` (removes horizontal scratches).
+
+    Returns
+    -------
+    ndarray
+        The denoised image, same shape and dtype as ``arr``.
+    """
+    if arr.ndim != 2:
+        raise ValueError("tv_denoise expects a 2-D array")
+    if nabla_comp not in ("both", "x", "y"):
+        raise ValueError(f"nabla_comp must be 'both', 'x', or 'y', got {nabla_comp!r}")
+
+    Ny, Nx = arr.shape
+    f = arr.astype(np.float64, copy=True).ravel()
+    u = f.copy()
+    p = np.zeros(2 * Ny * Nx)
+
+    L = math.sqrt(8.0)
+    sigma = 1.0 / (tau * L * L)
+
+    if method not in ("huber_rof", "tv_l1"):
+        raise ValueError(f"Unknown method {method!r}")
+
+    for it in range(max_iter + 1):
+        u_old = u.copy()
+        u = u - tau * _nabla_T_apply(p, Ny, Nx, nabla_comp)
+
+        if method == "tv_l1":
+            diff = u - f
+            u = f + np.maximum(0.0, np.abs(diff) - tau * lam) * np.sign(diff)
+            eff_alpha = 0.0
+        else:  # huber_rof
+            u = (u + tau * lam * f) / (1.0 + tau * lam)
+            eff_alpha = alpha
+
+        u_bar = 2.0 * u - u_old
+        p = (p + sigma * _nabla_apply(u_bar, Ny, Nx, nabla_comp)) / (1.0 + sigma * eff_alpha)
+
+        # Proximal projection onto the unit ball (isotropic TV).
+        p2 = p.reshape(2, -1)
+        norm = np.sqrt(p2[0] ** 2 + p2[1] ** 2)
+        denom = np.maximum(1.0, norm)
+        p = (p2 / denom[np.newaxis, :]).ravel()
+
+        if it > 0 and it % 50 == 0:
+            rmse = float(np.sqrt(np.mean((u - u_old) ** 2)))
+            if rmse < tol:
+                break
+
+    return u.reshape(Ny, Nx).astype(arr.dtype, copy=False)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 13.  line_profile  — z values along a straight segment, with physical x-axis
+# ═════════════════════════════════════════════════════════════════════════════
+
+def line_profile(
+    arr: np.ndarray,
+    p0_px: tuple[float, float],
+    p1_px: tuple[float, float],
+    *,
+    pixel_size_x_m: float,
+    pixel_size_y_m: float,
+    n_samples: Optional[int] = None,
+    width_px: float = 1.0,
+    interp: str = "linear",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample ``arr`` along the segment from ``p0_px`` to ``p1_px``.
+
+    Parameters
+    ----------
+    arr
+        2-D scan plane (any units).
+    p0_px, p1_px
+        Endpoint pixel coordinates ``(x, y)``. May be sub-pixel.
+    pixel_size_x_m, pixel_size_y_m
+        Physical pixel spacing in metres along x and y. Used to express the
+        sample axis in metres (handles non-square pixels correctly).
+    n_samples
+        Number of samples along the line. Default = ``ceil(geometric pixel
+        length) + 1``.
+    width_px
+        Half-thickness of a perpendicular averaging band in pixels. ``1.0``
+        samples the line itself; larger values average across a swath, which
+        is useful for noisy traces.
+    interp
+        ``"linear"`` (default; via ``scipy.ndimage.map_coordinates`` order 1)
+        or ``"nearest"`` (order 0).
+
+    Returns
+    -------
+    s_m, z
+        ``s_m`` — distance along the line in metres (length ``n_samples``).
+        ``z`` — sampled values, one per ``s_m`` entry.
+    """
+    if arr.ndim != 2:
+        raise ValueError("line_profile expects a 2-D array")
+    if pixel_size_x_m <= 0 or pixel_size_y_m <= 0:
+        raise ValueError("pixel_size_*_m must be > 0")
+    if width_px < 1.0:
+        raise ValueError("width_px must be >= 1.0")
+    if interp not in ("linear", "nearest"):
+        raise ValueError(f"Unknown interp {interp!r}")
+
+    from scipy.ndimage import map_coordinates
+
+    x0, y0 = float(p0_px[0]), float(p0_px[1])
+    x1, y1 = float(p1_px[0]), float(p1_px[1])
+    dx_px, dy_px = x1 - x0, y1 - y0
+    px_len = float(np.hypot(dx_px, dy_px))
+    if px_len < 1e-9:
+        raise ValueError("p0 and p1 are the same point")
+
+    if n_samples is None:
+        n_samples = int(math.ceil(px_len)) + 1
+    if n_samples < 2:
+        n_samples = 2
+
+    ts = np.linspace(0.0, 1.0, n_samples)
+    xs = x0 + ts * dx_px
+    ys = y0 + ts * dy_px
+
+    order = 1 if interp == "linear" else 0
+
+    if width_px <= 1.0:
+        # ``map_coordinates`` takes (row, col) = (y, x).
+        z = map_coordinates(arr, np.vstack([ys, xs]), order=order, mode="reflect")
+    else:
+        # Perpendicular unit vector in pixel space.
+        nx, ny = -dy_px / px_len, dx_px / px_len
+        n_perp = int(round(width_px))
+        offsets = np.linspace(-(width_px - 1) / 2.0,
+                              (width_px - 1) / 2.0, n_perp)
+        accum = np.zeros(n_samples, dtype=np.float64)
+        for off in offsets:
+            ys_o = ys + off * ny
+            xs_o = xs + off * nx
+            accum += map_coordinates(arr, np.vstack([ys_o, xs_o]),
+                                     order=order, mode="reflect")
+        z = accum / n_perp
+
+    # Physical distance: scale x and y components by their respective pixel sizes.
+    dx_m = dx_px * pixel_size_x_m
+    dy_m = dy_px * pixel_size_y_m
+    seg_len_m = float(np.hypot(dx_m, dy_m))
+    s_m = ts * seg_len_m
+    return s_m, z.astype(arr.dtype, copy=False)

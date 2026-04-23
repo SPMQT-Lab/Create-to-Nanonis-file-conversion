@@ -185,7 +185,22 @@ def load_scan(path) -> Scan:
         from probeflow.readers.mtrx import read_mtrx
         return read_mtrx(p)
 
+    # Last-resort fallback: ask Gwyddion (if installed) to convert the file to
+    # .gwy, then read that. This unlocks every vendor format Gwyddion knows
+    # about (Bruker, Park, NTEGRA, Nanoscope, …) for ~30 lines of code.
+    from probeflow.readers.gwy_bridge import gwyddion_convert_to_gwy
+    bridged = gwyddion_convert_to_gwy(p)
+    if bridged is not None:
+        from probeflow.readers.gwy import read_gwy
+        scan = read_gwy(bridged)
+        # Restore provenance to the original file (the .gwy is a tmp artefact).
+        scan.source_path = p
+        scan.source_format = f"gwyddion-bridge:{suffix.lstrip('.')}"
+        return scan
+
     raise ValueError(
         f"Unsupported scan format {suffix!r} for {p}. "
-        f"Supported: {', '.join(SUPPORTED_SUFFIXES)}"
+        f"Supported natively: {', '.join(SUPPORTED_SUFFIXES)}. "
+        f"Install the `gwyddion` system package to enable the auto-bridge "
+        f"for additional vendor formats."
     )
