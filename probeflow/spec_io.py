@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from typing import Any, Union
@@ -53,6 +53,11 @@ class SpecData:
     y_units: dict[str, str]
     position: tuple[float, float]
     metadata: dict[str, Any]
+    # Ordered list of all channel names as they should appear in the UI.
+    # Defaults to empty for backwards compatibility with old constructors.
+    channel_order: list[str] = field(default_factory=list)
+    # Subset of ``channel_order`` to preselect when a viewer first opens.
+    default_channels: list[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         n = self.metadata.get("n_points", "?")
@@ -230,6 +235,10 @@ def read_spec_file(
         pos_y_m,
     )
 
+    channel_order = ["I", "Z", "V"]
+    # Both time traces and bias sweeps default to showing just the current.
+    default_channels = ["I"]
+
     return SpecData(
         header=hdr,
         channels=channels,
@@ -239,6 +248,8 @@ def read_spec_file(
         y_units=y_units,
         position=(pos_x_m, pos_y_m),
         metadata=metadata,
+        channel_order=channel_order,
+        default_channels=default_channels,
     )
 
 

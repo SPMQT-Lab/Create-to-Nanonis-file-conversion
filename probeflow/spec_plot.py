@@ -257,6 +257,71 @@ def plot_current_histogram(
 _FLOAT_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
+# (scale, prefix) options per base SI unit, ordered from smallest to largest
+# prefix — the heuristic in ``choose_display_unit`` walks this list and picks
+# the prefix that puts the typical magnitude into [0.1, 1000].
+_UNIT_PREFIX_TABLE: dict[str, list[tuple[float, str]]] = {
+    "m": [(1e12, "pm"), (1e10, "Å"), (1e9, "nm"), (1e6, "µm"), (1.0, "m")],
+    "A": [(1e15, "fA"), (1e12, "pA"), (1e9, "nA"), (1e6, "µA"), (1.0, "A")],
+    "V": [(1e6, "µV"), (1e3, "mV"), (1.0, "V")],
+}
+
+
+def choose_display_unit(si_unit: str, values: np.ndarray) -> tuple[float, str]:
+    """Pick a sensible display unit and scale factor.
+
+    Returns ``(scale_factor, display_unit_string)`` where multiplying the raw
+    SI values by ``scale_factor`` gives numbers in the returned display unit.
+
+    Heuristic: compute the median absolute value of non-zero samples and
+    pick the SI prefix that brings that magnitude into ``[0.1, 1000]``.
+    For units without a prefix table (Hz, rad, dimensionless, unknown),
+    returns ``(1.0, si_unit)`` with no scaling.
+    """
+    if values is None:
+        return 1.0, si_unit
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return 1.0, si_unit
+
+    prefixes = _UNIT_PREFIX_TABLE.get(si_unit)
+    if prefixes is None:
+        return 1.0, si_unit
+
+    nonzero = arr[arr != 0]
+    if nonzero.size == 0:
+        return 1.0, si_unit
+    magnitude = float(np.median(np.abs(nonzero)))
+    if not np.isfinite(magnitude) or magnitude == 0.0:
+        return 1.0, si_unit
+
+    # Pick the smallest (most fine-grained) prefix whose scaled magnitude is
+    # still < 1000 — this walks the table from smallest to largest prefix.
+    chosen = prefixes[-1]  # default: no-prefix SI unit
+    for scale, label in prefixes:
+        scaled = magnitude * scale
+        if 0.1 <= scaled < 1000:
+            chosen = (scale, label)
+            break
+    else:
+        # Nothing matched the [0.1, 1000] window; pick the prefix whose scaled
+        # value is closest to the centre (30) in log-space.
+        best = None
+        best_dist = float("inf")
+        for scale, label in prefixes:
+            scaled = magnitude * scale
+            if scaled <= 0:
+                continue
+            dist = abs(np.log10(scaled) - np.log10(30.0))
+            if dist < best_dist:
+                best_dist = dist
+                best = (scale, label)
+        if best is not None:
+            chosen = best
+
+    return chosen
+
+
 def _parse_sxm_offset(hdr: dict) -> tuple[float, float]:
     """Extract the scan centre offset from an .sxm header dict (metres)."""
     raw = hdr.get("SCAN_OFFSET", "")

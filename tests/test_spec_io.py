@@ -394,3 +394,21 @@ class TestBiasSweepCurrentMagnitude:
         i = bias_sweep_spec.channels["I"]
         assert float(np.abs(i).max()) > 1e-12
         assert float(np.abs(i).max()) < 1e-6
+
+
+# ─── channel_order / default_channels ────────────────────────────────────────
+
+class TestChannelMetadata:
+    def test_channel_order_nonempty(self, bias_sweep_spec, time_trace_spec):
+        assert bias_sweep_spec.channel_order == ["I", "Z", "V"]
+        assert time_trace_spec.channel_order == ["I", "Z", "V"]
+
+    def test_default_channels_nonempty(self, bias_sweep_spec, time_trace_spec):
+        assert len(bias_sweep_spec.default_channels) >= 1
+        assert len(time_trace_spec.default_channels) >= 1
+
+    def test_defaults_reference_valid_channels(self, bias_sweep_spec, time_trace_spec):
+        for ch in bias_sweep_spec.default_channels:
+            assert ch in bias_sweep_spec.channels
+        for ch in time_trace_spec.default_channels:
+            assert ch in time_trace_spec.channels

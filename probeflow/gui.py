@@ -3140,19 +3140,36 @@ class FeaturesSidebar(QWidget):
 
 # ── Spec viewer dialog ───────────────────────────────────────────────────────
 class SpecViewerDialog(QDialog):
-    """Full-size viewer for a .VERT spectroscopy file."""
+    """Full-size viewer for a spectroscopy file (Createc .VERT or Nanonis .dat).
+
+    The viewer is channel-agnostic: it builds a toggleable list from
+    ``spec.channel_order`` and stacks one subplot per selected channel.
+    """
+
+    # Dark-theme colours for plot elements.
+    _BG = "#1e1e2e"
+    _FG = "#cdd6f4"
+    # Plot curve colours, cycled across selected channels.
+    _COLORS = ("#89b4fa", "#a6e3a1", "#fab387", "#f5c2e7",
+               "#94e2d5", "#f9e2af", "#cba6f7", "#f38ba8")
 
     def __init__(self, entry: VertFile, t: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(entry.stem)
-        self.setMinimumSize(760, 520)
-        self.resize(900, 580)
+        self.setMinimumSize(900, 560)
+        self.resize(1100, 640)
         self._entry = entry
-        self._t     = t
+        self._t = t
+        self._spec = None
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._canvas = None
+        self._fig = None
         self._build()
         self._load()
 
-    def _build(self):
+    # ── UI construction ─────────────────────────────────────────────────
+
+    def _build(self) -> None:
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
@@ -3162,16 +3179,43 @@ class SpecViewerDialog(QDialog):
         self._title.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._title)
 
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left panel: scrollable channel list.
+        self._channels_panel = QWidget()
+        self._channels_lay = QVBoxLayout(self._channels_panel)
+        self._channels_lay.setContentsMargins(6, 6, 6, 6)
+        self._channels_lay.setSpacing(4)
+        ch_header = QLabel("Channels")
+        ch_header.setFont(QFont("Helvetica", 10, QFont.Bold))
+        self._channels_lay.addWidget(ch_header)
+        self._channels_lay.addStretch(1)  # placeholder; populated in _load
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(self._channels_panel)
+        left_scroll.setMinimumWidth(200)
+        left_scroll.setMaximumWidth(300)
+        splitter.addWidget(left_scroll)
+
+        # Right panel: plot canvas.
         self._canvas_widget = QWidget()
-        self._canvas_lay    = QVBoxLayout(self._canvas_widget)
+        self._canvas_lay = QVBoxLayout(self._canvas_widget)
         self._canvas_lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self._canvas_widget, 1)
+        splitter.addWidget(self._canvas_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        lay.addWidget(splitter, 1)
 
         self._status = QLabel("Loading…")
         self._status.setFont(QFont("Helvetica", 9))
         lay.addWidget(self._status)
 
         btn_row = QHBoxLayout()
+        self._raw_btn = QPushButton("Show raw data")
+        self._raw_btn.setFixedWidth(140)
+        self._raw_btn.clicked.connect(self._show_raw_data)
+        btn_row.addWidget(self._raw_btn)
         btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setFixedWidth(80)
@@ -3179,50 +3223,151 @@ class SpecViewerDialog(QDialog):
         btn_row.addWidget(close_btn)
         lay.addLayout(btn_row)
 
-    def _load(self):
-        from .spec_io import read_spec_file
+    # ── Data load + channel list population ─────────────────────────────
 
-        dark = True
-        bg   = "#1e1e2e" if dark else "#ffffff"
-        fg   = "#cdd6f4" if dark else "#1e1e2e"
+    def _load(self) -> None:
+        from .spec_io import read_spec_file
 
         try:
             spec = read_spec_file(self._entry.path)
         except Exception as exc:
             self._status.setText(f"Error: {exc}")
             return
+        self._spec = spec
 
-        channels = [(ch, spec.channels[ch], spec.y_units.get(ch, ""))
-                    for ch in ("I", "Z", "V") if ch in spec.channels]
-        n = len(channels)
-        if n == 0:
-            self._status.setText("No channels found.")
-            return
+        # Pull channel_order off the spec; fall back to whatever keys are
+        # present for old SpecData objects that don't carry it.
+        order = list(spec.channel_order) if spec.channel_order else list(spec.channels.keys())
+        defaults = set(spec.default_channels)
 
-        colors = ["#89b4fa", "#a6e3a1", "#fab387"]
-        fig = Figure(figsize=(8.5, 4.5), tight_layout=True)
-        fig.patch.set_facecolor(bg)
-        FigureCanvasQTAgg(fig)
+        # Remove the placeholder stretch from the channels layout before
+        # inserting the real rows.
+        while self._channels_lay.count() > 1:
+            item = self._channels_lay.takeAt(1)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
-        for i, (ch, y, unit) in enumerate(channels):
-            ax = fig.add_subplot(1, n, i + 1)
-            ax.set_facecolor(bg)
-            ax.plot(spec.x_array, y, linewidth=1.0, color=colors[i % len(colors)])
-            ax.set_xlabel(spec.x_label, color=fg, fontsize=8)
-            ax.set_ylabel(f"{ch} ({unit})" if unit else ch, color=fg, fontsize=8)
-            ax.tick_params(colors=fg, labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_edgecolor(fg)
-                spine.set_linewidth(0.6)
-
-        canvas = FigureCanvasQTAgg(fig)
-        self._canvas_lay.addWidget(canvas)
+        self._checkboxes.clear()
+        for ch in order:
+            if ch not in spec.channels:
+                continue
+            unit = spec.y_units.get(ch, "")
+            label = f"{ch}  ({unit})" if unit else ch
+            cb = QCheckBox(label)
+            cb.setChecked(ch in defaults)
+            cb.toggled.connect(self._redraw)
+            self._channels_lay.addWidget(cb)
+            self._checkboxes[ch] = cb
+        self._channels_lay.addStretch(1)
 
         sweep = spec.metadata.get("sweep_type", "").replace("_", " ")
         n_pts = spec.metadata.get("n_points", 0)
-        self._status.setText(f"{sweep}  |  {n_pts} points  |  "
-                              f"pos ({spec.position[0]*1e9:.2f}, "
-                              f"{spec.position[1]*1e9:.2f}) nm")
+        self._status.setText(
+            f"{sweep}  |  {n_pts} points  |  "
+            f"pos ({spec.position[0]*1e9:.2f}, {spec.position[1]*1e9:.2f}) nm"
+        )
+
+        self._redraw()
+
+    # ── Plotting ────────────────────────────────────────────────────────
+
+    def _redraw(self) -> None:
+        if self._spec is None:
+            return
+        from .spec_plot import choose_display_unit
+
+        # Remove existing canvas if present.
+        if self._canvas is not None:
+            self._canvas_lay.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas = None
+            self._fig = None
+
+        selected = [ch for ch, cb in self._checkboxes.items() if cb.isChecked()]
+        if not selected:
+            # Empty figure keeps the area from collapsing.
+            fig = Figure(figsize=(8.5, 4.5), tight_layout=True)
+            fig.patch.set_facecolor(self._BG)
+            canvas = FigureCanvasQTAgg(fig)
+            self._canvas_lay.addWidget(canvas)
+            self._canvas = canvas
+            self._fig = fig
+            return
+
+        fig = Figure(figsize=(8.5, 4.5), tight_layout=True)
+        fig.patch.set_facecolor(self._BG)
+        axes = fig.subplots(nrows=len(selected), ncols=1, sharex=True)
+        if len(selected) == 1:
+            axes = [axes]
+
+        spec = self._spec
+        for i, (ch, ax) in enumerate(zip(selected, axes)):
+            y = np.asarray(spec.channels[ch], dtype=float)
+            unit = spec.y_units.get(ch, "")
+            scale, disp_unit = choose_display_unit(unit, y)
+            y_disp = y * scale
+
+            ax.set_facecolor(self._BG)
+            ax.plot(spec.x_array, y_disp, linewidth=1.0,
+                    color=self._COLORS[i % len(self._COLORS)])
+            ax.set_ylabel(f"{ch} ({disp_unit})" if disp_unit else ch,
+                          color=self._FG, fontsize=8)
+            ax.tick_params(colors=self._FG, labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(self._FG)
+                spine.set_linewidth(0.6)
+            if i < len(selected) - 1:
+                ax.tick_params(axis="x", labelbottom=False)
+
+        axes[-1].set_xlabel(spec.x_label, color=self._FG, fontsize=8)
+
+        canvas = FigureCanvasQTAgg(fig)
+        self._canvas_lay.addWidget(canvas)
+        self._canvas = canvas
+        self._fig = fig
+
+    # ── Raw-data table ──────────────────────────────────────────────────
+
+    def _show_raw_data(self) -> None:
+        if self._spec is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Raw data — {self._entry.stem}")
+        dlg.resize(640, 400)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        spec = self._spec
+        order = [ch for ch in spec.channel_order if ch in spec.channels]
+        if not order:
+            order = list(spec.channels.keys())
+        n_rows = min(20, len(spec.x_array))
+        n_cols = 1 + len(order)  # + 1 for x axis column
+
+        table = QTableWidget(n_rows, n_cols)
+        headers = [spec.x_label] + [
+            f"{ch} ({spec.y_units.get(ch, '')})" if spec.y_units.get(ch) else ch
+            for ch in order
+        ]
+        table.setHorizontalHeaderLabels(headers)
+
+        for r in range(n_rows):
+            table.setItem(r, 0, QTableWidgetItem(f"{spec.x_array[r]:.6g}"))
+            for c, ch in enumerate(order, start=1):
+                val = spec.channels[ch][r]
+                table.setItem(r, c, QTableWidgetItem(f"{val:.6g}"))
+        table.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(table)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        v.addLayout(btn_row)
+
+        dlg.exec()
 
 
 # ── Export dialog ────────────────────────────────────────────────────────────
