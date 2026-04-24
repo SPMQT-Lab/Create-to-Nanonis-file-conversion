@@ -218,11 +218,48 @@ def read_all_sxm_planes(
 
 # ── Writing a modified .sxm ──────────────────────────────────────────────────
 
+def _patch_comment_in_header(header_bytes: bytes, new_comment: str) -> bytes:
+    """Replace the :COMMENT: value in an SXM header byte block.
+
+    Locates the existing value (everything between ``:COMMENT:\\n`` and the
+    next ``:KEY:`` line) and replaces it with *new_comment*.  The function is
+    a no-op when no ``:COMMENT:`` section is found.
+    """
+    enc = new_comment.encode("latin-1", errors="replace")
+    marker = b":COMMENT:"
+    idx = header_bytes.find(marker)
+    if idx < 0:
+        return header_bytes
+
+    # Skip to the byte immediately after ":COMMENT:\n"
+    nl_idx = header_bytes.find(b"\n", idx + len(marker))
+    if nl_idx < 0:
+        return header_bytes
+    value_start = nl_idx + 1
+
+    # Advance line by line until a line that starts with ":" is found —
+    # that is the start of the next :KEY: section.
+    pos = value_start
+    while pos < len(header_bytes):
+        eol = header_bytes.find(b"\n", pos)
+        if eol < 0:
+            pos = len(header_bytes)
+            break
+        next_start = eol + 1
+        if next_start < len(header_bytes) and header_bytes[next_start:next_start + 1] == b":":
+            pos = next_start
+            break
+        pos = next_start
+
+    return header_bytes[:value_start] + enc + b"\n" + header_bytes[pos:]
+
+
 def write_sxm_with_planes(
     src_sxm: Path,
     out_sxm: Path,
     new_planes: List[np.ndarray],
     cushion_dir: Optional[Path] = None,
+    comment_override: Optional[str] = None,
 ) -> None:
     """Rewrite ``out_sxm`` using the header of ``src_sxm`` and new plane data.
 
@@ -245,6 +282,8 @@ def write_sxm_with_planes(
     plane_bytes = Ny * Nx * 4
 
     header_prefix = raw[:offset]
+    if comment_override is not None:
+        header_prefix = _patch_comment_in_header(header_prefix, comment_override)
 
     n_planes_src = 0
     while offset + (n_planes_src + 1) * plane_bytes <= len(raw):

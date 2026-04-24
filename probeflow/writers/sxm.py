@@ -25,6 +25,21 @@ from probeflow.scan import Scan
 from probeflow.sxm_io import write_sxm_with_planes
 
 
+def _build_comment(scan: Scan) -> str:
+    """Format scan.processing_history into a human-readable COMMENT string."""
+    source_name = scan.source_path.name if scan.source_path else "unknown"
+    lines = [f"Source: {source_name}"]
+    if scan.processing_history:
+        lines.append("Operations:")
+        for i, entry in enumerate(scan.processing_history, 1):
+            params_str = " ".join(f"{k}={v}" for k, v in entry["params"].items())
+            op_line = f"  {i}. {entry['op']}"
+            if params_str:
+                op_line += f" {params_str}"
+            lines.append(op_line)
+    return "\n".join(lines)
+
+
 def write_sxm(scan: Scan, out_path) -> None:
     out_path = Path(out_path)
     if scan.source_format == "sxm":
@@ -40,7 +55,10 @@ def write_sxm(scan: Scan, out_path) -> None:
 # ─── SXM-sourced fast path ──────────────────────────────────────────────────
 
 def _write_from_sxm(scan: Scan, out_path: Path) -> None:
-    write_sxm_with_planes(scan.source_path, out_path, scan.planes)
+    write_sxm_with_planes(
+        scan.source_path, out_path, scan.planes,
+        comment_override=_build_comment(scan),
+    )
 
 
 # ─── DAT-sourced reconstruction path ────────────────────────────────────────
@@ -82,6 +100,7 @@ def _write_from_dat(scan: Scan, out_path: Path) -> None:
         hdr, scan.source_path, num_chan_for_header,
         clip_low=1.0, clip_high=99.0,
     )
+    sxm_hdr["COMMENT"] = _build_comment(scan)
 
     Ny2, Nx2 = FT.shape
     sxm_hdr["SCAN_PIXELS"] = f"{Nx2}{' ' * 7}{Ny2}"
