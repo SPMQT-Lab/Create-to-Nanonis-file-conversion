@@ -41,6 +41,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -76,6 +77,36 @@ def _lut_from_matplotlib(name: str) -> np.ndarray:
         return np.stack([np.arange(256, dtype=np.uint8)] * 3, axis=1)
     rgba = (cmap(np.linspace(0, 1, 256))[:, :3] * 255.0).astype(np.uint8)
     return rgba
+
+
+# ─── Processing-op wrapper ───────────────────────────────────────────────────
+
+class _Op:
+    """A plane-level processing step bundled with its name and params.
+
+    Acts as a plain ``Callable[[np.ndarray], np.ndarray]`` so it can be
+    passed anywhere an op function is expected, but also carries the
+    metadata needed to write a ``processing_history`` entry.
+    """
+    __slots__ = ("name", "params", "_fn")
+
+    def __init__(self, name: str, params: dict,
+                 fn: Callable[[np.ndarray], np.ndarray]) -> None:
+        self.name = name
+        self.params = params
+        self._fn = fn
+
+    def __call__(self, arr: np.ndarray) -> np.ndarray:
+        return self._fn(arr)
+
+
+def _record_op(scan: "Scan", name: str, params: dict) -> None:
+    """Append one history entry to *scan.processing_history*."""
+    scan.processing_history.append({
+        "op": name,
+        "params": params,
+        "timestamp": datetime.now().isoformat(),
+    })
 
 
 # ─── Shared argument helpers ─────────────────────────────────────────────────
@@ -132,6 +163,8 @@ def _apply_to_plane(
             f"Plane {plane_idx} not present — file has {scan.n_planes} plane(s)"
         )
     scan.planes[plane_idx] = op(scan.planes[plane_idx])
+    if isinstance(op, _Op):
+        _record_op(scan, op.name, op.params)
     return scan
 
 
@@ -161,36 +194,41 @@ def _write_output(
     return out_path
 
 
-# ─── Pipeline atoms (each returns a new ndarray) ─────────────────────────────
+# ─── Pipeline atoms (each returns an _Op) ────────────────────────────────────
 
-def _op_plane_bg(order: int) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.subtract_background(a, order=order)
-
-
-def _op_align_rows(method: str) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.align_rows(a, method=method)
+def _op_plane_bg(order: int) -> _Op:
+    return _Op("plane_bg", {"order": order},
+               lambda a: _proc.subtract_background(a, order=order))
 
 
-def _op_remove_bad_lines(mad: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.remove_bad_lines(a, threshold_mad=mad)
+def _op_align_rows(method: str) -> _Op:
+    return _Op("align_rows", {"method": method},
+               lambda a: _proc.align_rows(a, method=method))
 
 
-def _op_facet_level(deg: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.facet_level(a, threshold_deg=deg)
+def _op_remove_bad_lines(mad: float) -> _Op:
+    return _Op("remove_bad_lines", {"threshold_mad": mad},
+               lambda a: _proc.remove_bad_lines(a, threshold_mad=mad))
 
 
-def _op_smooth(sigma: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.gaussian_smooth(a, sigma_px=sigma)
+def _op_facet_level(deg: float) -> _Op:
+    return _Op("facet_level", {"threshold_deg": deg},
+               lambda a: _proc.facet_level(a, threshold_deg=deg))
 
 
-def _op_edge(method: str, sigma: float,
-             sigma2: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.edge_detect(a, method=method, sigma=sigma, sigma2=sigma2)
+def _op_smooth(sigma: float) -> _Op:
+    return _Op("smooth", {"sigma_px": sigma},
+               lambda a: _proc.gaussian_smooth(a, sigma_px=sigma))
 
 
-def _op_fft(mode: str, cutoff: float,
-            window: str) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda a: _proc.fourier_filter(a, mode=mode, cutoff=cutoff, window=window)
+def _op_edge(method: str, sigma: float, sigma2: float) -> _Op:
+    return _Op("edge_detect", {"method": method, "sigma": sigma, "sigma2": sigma2},
+               lambda a: _proc.edge_detect(a, method=method, sigma=sigma, sigma2=sigma2))
+
+
+def _op_fft(mode: str, cutoff: float, window: str) -> _Op:
+    return _Op("fourier_filter", {"mode": mode, "cutoff": cutoff, "window": window},
+               lambda a: _proc.fourier_filter(a, mode=mode, cutoff=cutoff, window=window))
 
 
 # ─── Per-command runners ─────────────────────────────────────────────────────
