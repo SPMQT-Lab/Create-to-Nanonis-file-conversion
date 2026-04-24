@@ -110,26 +110,32 @@ def read_spec_file(
     *,
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
 ) -> SpecData:
+    """Read a spectroscopy file (Createc .VERT or Nanonis .dat) into SpecData.
+
+    The file type is identified from its content signature, so callers can
+    pass either vendor format without worrying about extensions.
+    """
+    from probeflow.file_type import FileType, sniff_file_type
+
+    path = Path(path)
+    ft = sniff_file_type(path)
+    if ft == FileType.NANONIS_SPEC:
+        from probeflow.readers.nanonis_spec import read_nanonis_spec
+        return read_nanonis_spec(path)
+    return _read_createc_vert(path, time_trace_threshold_mv=time_trace_threshold_mv)
+
+
+def _read_createc_vert(
+    path: Path,
+    *,
+    time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
+) -> SpecData:
     """Read a Createc .VERT spectroscopy file and return a SpecData object.
 
     The data is converted to SI units on read. The sweep type (bias sweep vs
     time trace) is detected from the Vpoint header entries first, falling back
     to checking the voltage range in the data column.
-
-    Parameters
-    ----------
-    path : str or Path
-        Path to a Createc .VERT file.
-    time_trace_threshold_mv : float
-        Voltage-range threshold (mV) below which a file is classified as a
-        time trace rather than a bias sweep. Default 1.0 mV.
-
-    Returns
-    -------
-    SpecData
-        Parsed and unit-converted spectroscopy data.
     """
-    path = Path(path)
     raw = path.read_bytes()
 
     data_pos = raw.find(b"DATA")
