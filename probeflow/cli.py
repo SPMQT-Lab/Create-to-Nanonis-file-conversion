@@ -439,9 +439,6 @@ def _cmd_convert(args) -> int:
         extra["clip_low"] = args.clip_low
     if args.clip_high is not None:
         extra["clip_high"] = args.clip_high
-    # TIFF-specific: format mode
-    if out.suffix.lower() in (".tif", ".tiff") and args.tiff_mode is not None:
-        extra["mode"] = args.tiff_mode
 
     try:
         scan.save(out, plane_idx=args.plane, **extra)
@@ -1307,10 +1304,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── any-in/any-out convert ──
     convert = sub.add_parser("convert",
-        help=("Convert any supported scan (.sxm / .dat / .gwy / .sm4 / .mtrx) "
-              "to any supported output (.sxm / .png / .pdf / .tif / .gwy / .csv)"))
+        help=("Convert any supported scan (.sxm, .dat) "
+              "to any supported output (.sxm, .png, .pdf, .csv)"))
     convert.add_argument("input", type=Path,
-        help="Input scan (format auto-detected from suffix)")
+        help="Input scan (format auto-detected from content)")
     convert.add_argument("output", type=Path,
         help="Output file (format auto-detected from suffix)")
     convert.add_argument("--plane", type=int, default=0,
@@ -1321,8 +1318,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Lower percentile clip (default 1.0)")
     convert.add_argument("--clip-high", type=float, default=None,
         help="Upper percentile clip (default 99.0)")
-    convert.add_argument("--tiff-mode", choices=("float", "uint16"),
-        default=None, help="TIFF output mode (default: float)")
     convert.add_argument("--verbose", action="store_true")
     convert.set_defaults(func=_cmd_convert)
 

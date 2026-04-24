@@ -1,4 +1,4 @@
-"""Tests for the Phase-2 writers (PDF / TIFF / GWY / CSV) + save_scan dispatch.
+"""Tests for the writers (PDF / CSV) + save_scan dispatch.
 
 We use a real Scan loaded from a bundled ``.dat`` sample so the writers are
 exercised end-to-end on realistic data.
@@ -17,7 +17,6 @@ from probeflow.writers import (
     save_scan,
     write_csv,
     write_pdf,
-    write_tiff,
 )
 
 
@@ -28,8 +27,12 @@ def dat_scan(first_sample_dat):
 
 class TestSupportedOutputSuffixes:
     def test_has_all_expected(self):
-        for s in (".sxm", ".png", ".pdf", ".tif", ".tiff", ".gwy", ".csv"):
+        for s in (".sxm", ".png", ".pdf", ".csv"):
             assert s in SUPPORTED_OUTPUT_SUFFIXES
+
+    def test_removed_suffixes_absent(self):
+        for s in (".tif", ".tiff", ".gwy"):
+            assert s not in SUPPORTED_OUTPUT_SUFFIXES
 
 
 class TestPdf:
@@ -42,29 +45,6 @@ class TestPdf:
 
     def test_via_save_method(self, dat_scan, tmp_path):
         out = tmp_path / "via_save.pdf"
-        dat_scan.save(out, plane_idx=0)
-        assert out.exists()
-
-
-class TestTiff:
-    def test_float_mode_preserves_values(self, dat_scan, tmp_path):
-        from PIL import Image
-        out = tmp_path / "out_f32.tif"
-        write_tiff(dat_scan, out, plane_idx=0, mode="float")
-        img = Image.open(out)
-        arr = np.asarray(img)
-        assert arr.dtype == np.float32
-        assert arr.shape == dat_scan.planes[0].shape
-
-    def test_uint16_mode_writes_16bit(self, dat_scan, tmp_path):
-        from PIL import Image
-        out = tmp_path / "out_u16.tif"
-        write_tiff(dat_scan, out, plane_idx=0, mode="uint16")
-        img = Image.open(out)
-        assert img.mode in ("I;16", "I;16L", "I;16B")
-
-    def test_via_save_method(self, dat_scan, tmp_path):
-        out = tmp_path / "via_save.tiff"
         dat_scan.save(out, plane_idx=0)
         assert out.exists()
 
@@ -90,20 +70,6 @@ class TestCsv:
         out = tmp_path / "via_save.csv"
         dat_scan.save(out, plane_idx=0)
         assert out.exists()
-
-
-class TestGwyMissingDep:
-    """write_gwy must surface a helpful ImportError when gwyfile isn't installed."""
-
-    def test_import_error_is_actionable(self, dat_scan, tmp_path):
-        import probeflow.writers.gwy as gwywriter
-        try:
-            gwywriter.write_gwy(dat_scan, tmp_path / "out.gwy")
-        except ImportError as exc:
-            assert "gwyddion" in str(exc)
-        except Exception:
-            # gwyfile may be installed in some dev envs — skip in that case.
-            pass
 
 
 class TestSaveScanDispatch:

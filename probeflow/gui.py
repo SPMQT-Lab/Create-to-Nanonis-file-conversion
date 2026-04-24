@@ -3373,13 +3373,10 @@ class SpecViewerDialog(QDialog):
 # ── Export dialog ────────────────────────────────────────────────────────────
 _EXPORT_FORMATS: list[tuple[str, str, str]] = [
     # (label, suffix without dot, QFileDialog filter string)
-    ("PNG image",         "png",  "PNG images (*.png)"),
-    ("PDF figure",        "pdf",  "PDF figures (*.pdf)"),
-    ("TIFF (float32)",    "tif",  "TIFF images (*.tif *.tiff)"),
-    ("TIFF (uint16)",     "tif",  "TIFF images (*.tif *.tiff)"),
-    ("Gwyddion .gwy",     "gwy",  "Gwyddion files (*.gwy)"),
-    ("CSV grid",          "csv",  "CSV grids (*.csv)"),
-    ("Nanonis .sxm",      "sxm",  "Nanonis files (*.sxm)"),
+    ("PNG image",    "png", "PNG images (*.png)"),
+    ("PDF figure",   "pdf", "PDF figures (*.pdf)"),
+    ("CSV grid",     "csv", "CSV grids (*.csv)"),
+    ("Nanonis .sxm", "sxm", "Nanonis files (*.sxm)"),
 ]
 
 
@@ -3493,7 +3490,6 @@ class ExportDialog(QDialog):
             suffix       : str    — lower-case extension (no leading dot)
             file_filter  : str    — QFileDialog filter pattern
             add_scalebar / scalebar_unit / scalebar_pos  — only meaningful for PNG/PDF
-            tiff_mode    : 'float' | 'uint16'            — only for TIFF
         """
         idx = self._fmt_cb.currentIndex()
         label, suffix, filt = _EXPORT_FORMATS[idx]
@@ -3504,8 +3500,6 @@ class ExportDialog(QDialog):
         elif self._pm_rb.isChecked():
             unit = "pm"
 
-        tiff_mode = "uint16" if label == "TIFF (uint16)" else "float"
-
         return {
             "format_label":  label,
             "suffix":        suffix,
@@ -3513,7 +3507,6 @@ class ExportDialog(QDialog):
             "add_scalebar":  self._scalebar_cb.isChecked(),
             "scalebar_unit": unit,
             "scalebar_pos":  self._pos_cb.currentText(),
-            "tiff_mode":     tiff_mode,
         }
 
 
@@ -4294,11 +4287,6 @@ class ProbeFlowWindow(QMainWindow):
                 scalebar_unit=settings["scalebar_unit"],
                 scalebar_pos=settings["scalebar_pos"],
             )
-        if suffix == "tif":
-            kwargs["mode"] = settings["tiff_mode"]
-            if settings["tiff_mode"] == "uint16":
-                kwargs["clip_low"]  = clip_low
-                kwargs["clip_high"] = clip_high
 
         try:
             scan.save(out_path, plane_idx=0, **kwargs)

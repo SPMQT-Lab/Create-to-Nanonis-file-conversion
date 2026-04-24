@@ -114,40 +114,20 @@ class Scan:
         from probeflow.writers.pdf import write_pdf
         write_pdf(self, out_path, plane_idx=plane_idx, **kwargs)
 
-    def save_tiff(self, out_path, plane_idx: int = 0, **kwargs) -> None:
-        """Write one plane as a TIFF (float32 by default)."""
-        from probeflow.writers.tiff import write_tiff
-        write_tiff(self, out_path, plane_idx=plane_idx, **kwargs)
-
-    def save_gwy(self, out_path) -> None:
-        """Write all planes to a Gwyddion ``.gwy`` file (optional extra)."""
-        from probeflow.writers.gwy import write_gwy
-        write_gwy(self, out_path)
-
     def save_csv(self, out_path, plane_idx: int = 0, **kwargs) -> None:
         """Dump one plane as a 2-D CSV grid (with a ``#``-comment header)."""
         from probeflow.writers.csv import write_csv
         write_csv(self, out_path, plane_idx=plane_idx, **kwargs)
 
     def save(self, out_path, plane_idx: int = 0, **kwargs) -> None:
-        """Suffix-driven save: ``.sxm`` / ``.png`` / ``.pdf`` / ``.tiff`` /
-        ``.gwy`` / ``.csv``.
-        """
+        """Suffix-driven save: ``.sxm`` / ``.png`` / ``.pdf`` / ``.csv``."""
         from probeflow.writers import save_scan
         save_scan(self, out_path, plane_idx=plane_idx, **kwargs)
 
 
 # ── Dispatcher ──────────────────────────────────────────────────────────────
 
-SUPPORTED_SUFFIXES: tuple[str, ...] = (
-    ".sxm",        # Nanonis                           — always on
-    ".dat",        # Createc                           — always on
-    ".gwy",        # Gwyddion                          — needs [gwyddion] extra
-    ".sm4",        # RHK                               — needs [rhk] extra
-    ".mtrx",       # Omicron Matrix                    — needs [omicron] extra
-    ".z_mtrx",     # Omicron Matrix topography payload
-    ".i_mtrx",     # Omicron Matrix current payload
-)
+SUPPORTED_SUFFIXES: tuple[str, ...] = (".sxm", ".dat")
 
 
 def load_scan(path) -> Scan:
@@ -182,26 +162,7 @@ def load_scan(path) -> Scan:
             "use probeflow.spec_io.read_spec_file to load it."
         )
 
-    # Last-resort fallback: ask Gwyddion (if installed) to convert the file to
-    # .gwy, then read that. This unlocks every vendor format Gwyddion knows
-    # about (Bruker, Park, NTEGRA, Nanoscope, …) for ~30 lines of code.
-    try:
-        from probeflow.readers.gwy_bridge import gwyddion_convert_to_gwy
-    except ImportError:
-        gwyddion_convert_to_gwy = None  # type: ignore[assignment]
-    if gwyddion_convert_to_gwy is not None:
-        bridged = gwyddion_convert_to_gwy(p)
-        if bridged is not None:
-            from probeflow.readers.gwy import read_gwy
-            scan = read_gwy(bridged)
-            # Restore provenance to the original file (the .gwy is tmp).
-            scan.source_path = p
-            scan.source_format = f"gwyddion-bridge:{p.suffix.lstrip('.')}"
-            return scan
-
     raise ValueError(
         f"Unsupported or unrecognised scan file: {p}. "
-        f"Supported natively: {', '.join(SUPPORTED_SUFFIXES)}. "
-        f"Install the `gwyddion` system package to enable the auto-bridge "
-        f"for additional vendor formats."
+        f"Supported: {', '.join(SUPPORTED_SUFFIXES)}"
     )
