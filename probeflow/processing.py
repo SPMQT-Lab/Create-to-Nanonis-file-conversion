@@ -682,23 +682,15 @@ def export_png(
     """
     from PIL import Image as _Image, ImageDraw as _IDraw, ImageFont as _IFont
 
+    from probeflow.display import array_to_uint8 as _array_to_uint8, clip_range_from_array as _clip_range
+
     arr = arr.astype(np.float64, copy=True)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        raise ValueError("Array contains no finite values.")
+    vmin, vmax = _clip_range(arr, clip_low, clip_high)  # raises ValueError if no finite values
 
-    vmin = float(np.percentile(finite, clip_low))
-    vmax = float(np.percentile(finite, clip_high))
-    if vmax <= vmin:
-        vmin, vmax = float(finite.min()), float(finite.max())
-    if vmax <= vmin:
-        vmax = vmin + 1.0
-
-    safe = np.where(np.isfinite(arr), arr, vmin).astype(np.float64)
-    u8   = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
-    lut  = lut_fn(colormap_key)
+    u8      = _array_to_uint8(arr, vmin=vmin, vmax=vmax)
+    lut     = lut_fn(colormap_key)
     colored = lut[u8]
-    img = _Image.fromarray(colored, mode="RGB")
+    img     = _Image.fromarray(colored, mode="RGB")
 
     width_m = scan_range_m[0] if len(scan_range_m) >= 1 else 0.0
     Ny, Nx  = arr.shape

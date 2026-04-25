@@ -41,10 +41,11 @@ class TestClipRangeFromArr:
         assert lo is None and hi is None
 
     def test_single_value_array(self):
-        # Only one finite pixel — can't compute a range
+        # One finite pixel: constant-image fallback widens the range so it renders
         arr = np.array([[np.nan, np.nan], [np.nan, 5.0]])
         lo, hi = clip_range_from_arr(arr)
-        assert lo is None and hi is None
+        assert lo is not None and hi is not None
+        assert hi > lo
 
     def test_constant_image_returns_range(self):
         arr = np.full((20, 20), 3.0)

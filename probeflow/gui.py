@@ -62,6 +62,11 @@ def _open_url(url: str) -> None:
 
 from probeflow import processing as _proc
 from probeflow.common import mark_processed_stem
+from probeflow.display import (
+    array_to_uint8 as _array_to_uint8,
+    clip_range_from_array as _clip_range_from_array,
+    histogram_from_array as _histogram_from_array,
+)
 from probeflow.gui_processing import NUMERIC_PROC_KEYS, apply_processing_state_to_scan
 from probeflow.scan import SUPPORTED_SUFFIXES, load_scan
 
@@ -257,25 +262,17 @@ def clip_range_from_arr(
     pct_lo: float = 1.0,
     pct_hi: float = 99.0,
 ) -> tuple[Optional[float], Optional[float]]:
-    """Return (vmin, vmax) for display clipping at the given percentiles.
+    """Return (vmin, vmax) for display clipping, or (None, None) on failure.
 
-    Guards:
-    - None / empty / all-NaN array → (None, None)
-    - Constant image or percentiles coincide → (min, max), then ±1 offset
-    - Very small arrays (< 2 finite values) → (None, None)
+    Thin adapter over :func:`probeflow.display.clip_range_from_array` that
+    preserves the GUI contract of returning (None, None) rather than raising.
     """
     if arr is None:
         return None, None
-    finite = arr[np.isfinite(arr)]
-    if finite.size < 2:
+    try:
+        return _clip_range_from_array(arr, pct_lo, pct_hi)
+    except ValueError:
         return None, None
-    lo = float(np.percentile(finite, pct_lo))
-    hi = float(np.percentile(finite, pct_hi))
-    if hi <= lo:
-        lo, hi = float(finite.min()), float(finite.max())
-    if hi <= lo:
-        lo, hi = lo - 1.0, lo + 1.0
-    return lo, hi
 
 
 def _apply_processing(
@@ -342,8 +339,7 @@ def render_scan_thumbnail(
         if vmin is None:
             return None
 
-        safe    = np.where(np.isfinite(arr), arr, vmin).astype(np.float64)
-        u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+        u8      = _array_to_uint8(arr, vmin=vmin, vmax=vmax)
         colored = _get_lut(colormap)[u8]
         img     = Image.fromarray(colored, mode="RGB")
         img.thumbnail(size, Image.LANCZOS)
@@ -436,14 +432,13 @@ def render_with_processing(
 
         # Grain overlay: colour-code labelled regions on top of the image
         grain_thresh = processing.get('grain_threshold')
+        u8 = _array_to_uint8(a, vmin=vmin, vmax=vmax)
         if grain_thresh is not None:
             label_map, n_grains, _ = _proc.detect_grains(
                 a,
                 threshold_pct=float(grain_thresh),
                 above=bool(processing.get('grain_above', True)),
             )
-            safe    = np.where(np.isfinite(a), a, vmin).astype(np.float64)
-            u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
             colored = _get_lut(colormap)[u8].copy()
             # Tint grain pixels: blend toward red
             grain_px = label_map > 0
@@ -452,8 +447,6 @@ def render_with_processing(
             colored[grain_px, 2] = colored[grain_px, 2] // 3
             img = Image.fromarray(colored, mode="RGB")
         else:
-            safe    = np.where(np.isfinite(a), a, vmin).astype(np.float64)
-            u8      = np.clip((safe - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
             colored = _get_lut(colormap)[u8]
             img     = Image.fromarray(colored, mode="RGB")
 
@@ -1846,16 +1839,6 @@ class ImageViewerDialog(QDialog):
         self._hist_flat_phys = flat_phys
         self._hist_unit = unit
 
-        # Robust x-axis range (0.1–99.9 %): suppresses outlier spikes and
-        # sets the histogram bin range so bins are distributed over the
-        # useful signal, not stretched over a single extreme pixel.
-        x_min = x_max = None
-        if flat_phys.size >= 10:
-            x_min = float(np.percentile(flat_phys, 0.1))
-            x_max = float(np.percentile(flat_phys, 99.9))
-            if not (np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min):
-                x_min = x_max = None
-
         # Clip lines: percentiles applied to flat_phys (already in display units)
         lo_phys, hi_phys = clip_range_from_arr(flat_phys, self._clip_low, self._clip_high)
         if lo_phys is None:
@@ -1866,11 +1849,17 @@ class ImageViewerDialog(QDialog):
         self._fig.patch.set_facecolor(bg)
         self._ax.set_facecolor(bg)
 
-        # Bin only over the robust display range so bars represent useful signal
-        hist_kw = {"bins": 128}
-        if x_min is not None:
-            hist_kw["range"] = (x_min, x_max)
-        counts, edges = np.histogram(flat_phys, **hist_kw)
+        # Bin over a wide robust range (0.1–99.9 %) so bars represent useful
+        # signal and are not stretched by outliers.  Uses the shared display
+        # pipeline for consistent finite-pixel handling.
+        try:
+            counts, edges = _histogram_from_array(
+                flat_phys, bins=128, clip_percentiles=(0.1, 99.9))
+            x_min, x_max = float(edges[0]), float(edges[-1])
+        except ValueError:
+            counts, edges = np.histogram(flat_phys, bins=128)
+            x_min, x_max = None, None
+
         counts = np.maximum(counts, 1)
         centers = (edges[:-1] + edges[1:]) / 2.0
         widths = np.diff(edges)
@@ -3017,13 +3006,9 @@ class FeaturesPanel(QWidget):
             self._canvas.draw_idle()
             return
 
-        finite = self._arr[np.isfinite(self._arr)]
-        if finite.size:
-            vmin = float(np.percentile(finite, 1.0))
-            vmax = float(np.percentile(finite, 99.0))
-            if vmax <= vmin:
-                vmax = vmin + 1.0
-        else:
+        try:
+            vmin, vmax = _clip_range_from_array(self._arr, 1.0, 99.0)
+        except ValueError:
             vmin, vmax = 0.0, 1.0
         self._ax.imshow(self._arr, cmap="gray", vmin=vmin, vmax=vmax,
                          interpolation="nearest", origin="upper")
