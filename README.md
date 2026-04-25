@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">ProbeFlow</h1>
-<p align="center"><em>An imaging-lab workflow tool for scanning-probe microscopy.</em></p>
+<p align="center"><em>A focused Createc/Nanonis SPM browser, converter, and analysis workflow tool for STM images and point spectroscopy.</em></p>
 
 ---
 
@@ -17,8 +17,8 @@ It's not another viewer — it's the glue between your microscope, your analysis
 
 ## What's In It
 
-* **Formats.** ProbeFlow reads Createc `.dat` (topography) and `.VERT` (spectroscopy), Nanonis `.sxm` (topography) and `.dat` (spectroscopy). It writes PNG, PDF, CSV, JSON, and Nanonis-compatible `.sxm`. Raw input files are never modified; all outputs go to separate files with clear provenance.
-* **Browse.** A thumbnail grid over an imaging session. Recognises Createc `.dat` scans, Nanonis `.sxm` scans, and both Createc (`.VERT`) and Nanonis (`.dat`) spectroscopy files in a single folder. Live clip sliders, per-card colormaps, per-card undo, and a full-size viewer with interactive histogram.
+* **Formats.** ProbeFlow reads Createc `.dat` (topography) and `.VERT` (spectroscopy), Nanonis `.sxm` (topography) and `.dat` (spectroscopy). It writes PNG, PDF, CSV, JSON, and Nanonis-compatible `.sxm`. Raw input files are never modified; all outputs go to separate files with clear provenance. PNG and JSON exports can include provenance describing the source file, selected channel, display state, and processing state.
+* **Browse.** A thumbnail grid over an imaging session. Recognises Createc `.dat` scans, Nanonis `.sxm` scans, and both Createc (`.VERT`) and Nanonis (`.dat`) spectroscopy files in a single folder. Folder discovery runs through the shared indexing layer. The viewer uses shared display rendering for thumbnails, full-size images, histograms, and PNG export. Contrast can be set by percentile autoscale or by ImageJ-style manual histogram limits.
 * **Process** — plane / facet flattening, row-offset alignment, bad-line interpolation, Gaussian / FFT / edge / TV denoising, grain detection, periodicity measurement.  All usable from the GUI, chainable as bash pipelines, and importable as plain Python functions (no Qt needed).
 * **Analyse features** — particle / molecule segmentation, template-match counting, few-shot classification, SIFT lattice extraction, unit-cell averaging, line profiles.  Built for *discrete-object* STM work: molecular adsorbates, defect sites, coverage statistics.  Exports per-object JSON so your counts live alongside your raw scans in git or a lab notebook.
 * **Point-measurement spectroscopy** — Createc `.VERT` and Nanonis `.dat` bias sweeps, time traces and Z spectroscopy read into a unit-aware model you can smooth, differentiate, overlay, waterfall, and map back onto a topography image to show *where* each spectrum came from.
@@ -32,6 +32,23 @@ It's not another viewer — it's the glue between your microscope, your analysis
 * **Reproducibility by default.**  Every CLI invocation is a command you can paste into a methods section.  Every Python function has no Qt dependency, so lab notebooks run without PySide6 installed.
 
 > **Status: beta.** The on-disk formats, the CLI surface, and the Python API are still subject to change between commits. Pin a commit hash if you depend on the current shape.
+
+## Current backend status
+
+ProbeFlow's current development focus is the boring but important backend layer: reliable Createc/Nanonis loading, validated scan objects, consistent display rendering, and traceable exports.
+
+Recent backend work includes:
+
+- content-sniffed loading for Createc `.dat`, Createc `.VERT`, Nanonis `.sxm`, and Nanonis spectroscopy `.dat` files;
+- validation of loaded scan objects before GUI/export use;
+- Createc first-column artifact handling in the reader path;
+- lightweight folder indexing via `ProbeFlowItem` / `index_folder()`;
+- shared display rendering for thumbnails, viewer images, histograms, and PNG export;
+- ImageJ-style manual display limits from the interactive histogram, alongside percentile autoscale;
+- canonical `ProcessingState` objects for GUI/export consistency;
+- export provenance for PNG/JSON outputs, including source file, channel, display state, processing state, and ProbeFlow version.
+
+Raw input files are not modified.
 
 ---
 
@@ -293,7 +310,7 @@ probeflow gui
 
 Three tabs:
 
-* **Browse** — point at a folder; the grid auto-detects every supported scan and spectrum format (`.sxm`, `.dat`, `.VERT`) and renders thumbnails for each. An *All / Images / Spectra* toggle filters the visible cards. Per-card colormap gallery, live clip sliders, per-scan undo, full-size viewer with interactive histogram, processing panel, and PNG export dialog.
+* **Browse** — point at a folder; the grid auto-detects supported Createc/Nanonis scan and spectroscopy files and renders thumbnails. An *All / Images / Spectra* toggle filters the visible cards. The full-size viewer has an interactive histogram with Auto percentile contrast and manual red/green display-limit bars, similar in spirit to ImageJ brightness/contrast controls. PNG export uses the same display limits as the viewer and writes provenance when available.
 * **Convert** — folder-in / folder-out batch dat→sxm and dat→png with PNG / SXM checkboxes and clip-percentile controls.
 * **Features** — load the currently-selected Browse scan, choose a mode (*Particles* / *Template* / *Lattice*), tune parameters, hit *Run*. Results overlay on the canvas (contours, detection markers, primitive vectors + unit cell) and populate a sortable table. *Export JSON…* writes results with full scan provenance via `probeflow.writers.json`. Heavy analyses run on a background thread so the UI stays responsive.
 
@@ -399,6 +416,12 @@ probeflow/              # installable package
 ├── __init__.py
 ├── scan.py             # Scan dataclass + load_scan dispatcher (main entry point)
 ├── file_type.py        # content-sniffing file-type classifier
+├── indexing.py         # lightweight folder indexing into ProbeFlowItem records
+├── validation.py       # Scan validation before GUI/export use
+├── display.py          # shared clipping, normalisation, histogram, RGBA/uint8 rendering
+├── display_state.py    # percentile/manual display-range state
+├── processing_state.py # canonical processing step/state objects
+├── export_provenance.py # provenance records for exported outputs
 ├── readers/            # scan readers (sxm, dat) + nanonis_spec spectroscopy reader
 ├── writers/            # output formats (sxm, png, pdf, csv, json)
 ├── processing.py       # image-processing pipeline (GUI-free) — incl. tv_denoise, line_profile
@@ -444,6 +467,7 @@ Covers:
 * SIFT lattice extraction and `average_unit_cell`.
 * Line-profile sampling with sub-pixel interpolation and swath averaging.
 * Content-sniffing file-type dispatcher (`probeflow.file_type`).
+* Loading/indexing/display-state/export-provenance contracts for the Createc/Nanonis backend path.
 
 ---
 
