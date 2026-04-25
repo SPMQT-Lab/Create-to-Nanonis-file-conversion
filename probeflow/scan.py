@@ -131,6 +131,11 @@ class Scan:
 SUPPORTED_SUFFIXES: tuple[str, ...] = (".sxm", ".dat")
 
 
+def _validate(scan: "Scan") -> None:
+    from probeflow.validation import validate_scan
+    validate_scan(scan)
+
+
 def load_scan(path) -> Scan:
     """Load an STM scan file, dispatching on its content signature.
 
@@ -148,10 +153,14 @@ def load_scan(path) -> Scan:
 
     if ft == FileType.NANONIS_IMAGE:
         from probeflow.readers.sxm import read_sxm
-        return read_sxm(p)
+        scan = read_sxm(p)
+        _validate(scan)
+        return scan
     if ft == FileType.CREATEC_IMAGE:
         from probeflow.readers.dat import read_dat
-        return read_dat(p)
+        scan = read_dat(p)
+        _validate(scan)
+        return scan
     if ft == FileType.NANONIS_SPEC:
         raise ValueError(
             f"{p.name}: this is a Nanonis spectroscopy file — "
