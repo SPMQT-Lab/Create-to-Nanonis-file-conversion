@@ -66,6 +66,13 @@ def write_json(
             "plane_names": list(scan.plane_names),
             "plane_units": list(scan.plane_units),
         })
+        if scan.processing_history:
+            meta["processing_state"] = {
+                "steps": [
+                    {"op": h["op"], "params": h["params"]}
+                    for h in scan.processing_history
+                ]
+            }
     if extra_meta:
         meta.update(extra_meta)
 

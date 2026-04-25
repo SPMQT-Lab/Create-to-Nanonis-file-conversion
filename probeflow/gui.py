@@ -68,7 +68,11 @@ from probeflow.display import (
     histogram_from_array as _histogram_from_array,
 )
 from probeflow.display_state import DisplayRangeState
-from probeflow.gui_processing import NUMERIC_PROC_KEYS, apply_processing_state_to_scan
+from probeflow.gui_processing import (
+    NUMERIC_PROC_KEYS,
+    apply_processing_state_to_scan,
+    processing_state_from_gui,
+)
 from probeflow.scan import SUPPORTED_SUFFIXES, load_scan
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -282,43 +286,13 @@ def _apply_processing(
 ) -> np.ndarray:
     """Apply the array-transform portion of the processing pipeline.
 
-    Grain detection / colormap / clip settings are display-only and are
-    intentionally excluded here.  Returns a new float64 array; the input
-    is never modified.
+    Converts the GUI processing dict to a canonical ProcessingState and
+    delegates to apply_processing_state().  Grain detection / colormap / clip
+    settings are display-only and are silently ignored.  Returns a new float64
+    array; the input is never modified.
     """
-    if not processing:
-        return arr
-    a = arr.astype(np.float64, copy=True)
-    if processing.get('remove_bad_lines'):
-        a = _proc.remove_bad_lines(a)
-    align = processing.get('align_rows')
-    if align:
-        a = _proc.align_rows(a, method=align)
-    bg_order = processing.get('bg_order')
-    if bg_order is not None:
-        a = _proc.subtract_background(a, order=int(bg_order))
-    if processing.get('facet_level'):
-        a = _proc.facet_level(a)
-    smooth_sigma = processing.get('smooth_sigma')
-    if smooth_sigma:
-        a = _proc.gaussian_smooth(a, sigma_px=float(smooth_sigma))
-    edge_method = processing.get('edge_method')
-    if edge_method:
-        a = _proc.edge_detect(
-            a,
-            method=edge_method,
-            sigma=float(processing.get('edge_sigma', 1.0)),
-            sigma2=float(processing.get('edge_sigma2', 2.0)),
-        )
-    fft_mode = processing.get('fft_mode')
-    if fft_mode is not None:
-        a = _proc.fourier_filter(
-            a,
-            mode=fft_mode,
-            cutoff=float(processing.get('fft_cutoff', 0.10)),
-            window=str(processing.get('fft_window', 'hanning')),
-        )
-    return a
+    from probeflow.processing_state import apply_processing_state
+    return apply_processing_state(arr, processing_state_from_gui(processing or {}))
 
 
 def render_scan_thumbnail(
