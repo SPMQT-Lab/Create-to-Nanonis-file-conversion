@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from probeflow.display_state import DisplayRangeState
     from probeflow.processing_state import ProcessingState
-    from probeflow.scan import Scan
+    from probeflow.scan_model import Scan
 
 
 def _get_version() -> str | None:

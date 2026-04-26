@@ -50,7 +50,8 @@ from PIL import Image
 
 from probeflow import processing as _proc
 from probeflow.common import setup_logging
-from probeflow.scan import Scan, load_scan
+from probeflow.scan import load_scan
+from probeflow.scan_model import Scan
 from probeflow.sxm_io import (
     parse_sxm_header,
     read_all_sxm_planes,

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from probeflow.common import check_overwrite
-from probeflow.scan import Scan
+from probeflow.scan_model import Scan
 from probeflow.sxm_io import write_sxm_with_planes
 
 

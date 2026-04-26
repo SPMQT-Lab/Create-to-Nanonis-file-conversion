@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 
 from probeflow.common import check_overwrite
-from probeflow.scan import Scan
+from probeflow.scan_model import Scan
 
 
 def write_pdf(

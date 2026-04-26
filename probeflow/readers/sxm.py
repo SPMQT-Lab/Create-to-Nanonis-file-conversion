@@ -7,7 +7,7 @@ from typing import List
 
 import numpy as np
 
-from probeflow.scan import PLANE_CANON_NAMES, PLANE_CANON_UNITS, Scan
+from probeflow.scan_model import PLANE_CANON_NAMES, PLANE_CANON_UNITS, Scan
 from probeflow.sxm_io import read_all_sxm_planes, sxm_scan_range
 
 

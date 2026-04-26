@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from probeflow.scan import Scan
+    from probeflow.scan_model import Scan
 
 # Keys in the GUI processing state dict that correspond to numeric data
 # transforms (as opposed to display-only settings like grain overlays,

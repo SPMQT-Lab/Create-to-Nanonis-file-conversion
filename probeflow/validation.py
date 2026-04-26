@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from probeflow.scan import Scan
+from probeflow.scan_model import Scan
 
 _SUPPORTED_FORMATS = {"dat", "sxm"}
 

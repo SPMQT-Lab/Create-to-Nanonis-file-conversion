@@ -9,7 +9,7 @@ import numpy as np
 
 from probeflow.common import check_overwrite
 from probeflow.processing import export_png
-from probeflow.scan import Scan
+from probeflow.scan_model import Scan
 
 
 def lut_from_matplotlib(name: str) -> np.ndarray:

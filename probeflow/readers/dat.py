@@ -44,7 +44,7 @@ from probeflow.common import (
     v_per_dac,
     z_scale_m_per_dac,
 )
-from probeflow.scan import Scan
+from probeflow.scan_model import Scan
 
 
 def read_dat(path) -> Scan:
