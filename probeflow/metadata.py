@@ -142,26 +142,9 @@ def read_scan_metadata(path) -> ScanMetadata:
     internally, but the public API is designed so header-only parsing can be
     substituted later without changing callers.
     """
-    from probeflow.file_type import FileType, sniff_file_type
+    from probeflow.loaders import identify_scan_file
     from probeflow.scan import load_scan
 
-    p = Path(path)
-    ft = sniff_file_type(p)
+    sig = identify_scan_file(path)
 
-    if ft == FileType.NANONIS_IMAGE:
-        return metadata_from_scan(load_scan(p))
-    if ft == FileType.CREATEC_IMAGE:
-        return metadata_from_scan(load_scan(p))
-    if ft == FileType.NANONIS_SPEC:
-        raise ValueError(
-            f"{p.name}: this is a Nanonis spectroscopy file — "
-            "read_scan_metadata only supports image scans"
-        )
-    if ft == FileType.CREATEC_SPEC:
-        raise ValueError(
-            f"{p.name}: this is a Createc .VERT spectroscopy file — "
-            "read_scan_metadata only supports image scans"
-        )
-    raise ValueError(
-        f"Unsupported or unrecognised file for metadata: {p}"
-    )
+    return metadata_from_scan(load_scan(sig.path))

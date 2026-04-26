@@ -146,33 +146,22 @@ def load_scan(path) -> Scan:
     Point-spectroscopy files (Createc ``.VERT`` and Nanonis ``.dat`` spec)
     are not scans — use :func:`probeflow.spec_io.read_spec_file` instead.
     """
-    from probeflow.file_type import FileType, sniff_file_type
+    from probeflow.loaders import identify_scan_file
 
-    p = Path(path)
-    ft = sniff_file_type(p)
+    sig = identify_scan_file(path)
 
-    if ft == FileType.NANONIS_IMAGE:
+    if sig.source_format == "sxm":
         from probeflow.readers.sxm import read_sxm
-        scan = read_sxm(p)
+        scan = read_sxm(sig.path)
         _validate(scan)
         return scan
-    if ft == FileType.CREATEC_IMAGE:
+    if sig.source_format == "dat":
         from probeflow.readers.dat import read_dat
-        scan = read_dat(p)
+        scan = read_dat(sig.path)
         _validate(scan)
         return scan
-    if ft == FileType.NANONIS_SPEC:
-        raise ValueError(
-            f"{p.name}: this is a Nanonis spectroscopy file — "
-            "use probeflow.spec_io.read_spec_file to load it."
-        )
-    if ft == FileType.CREATEC_SPEC:
-        raise ValueError(
-            f"{p.name}: this is a Createc .VERT spectroscopy file — "
-            "use probeflow.spec_io.read_spec_file to load it."
-        )
 
     raise ValueError(
-        f"Unsupported or unrecognised scan file: {p}. "
+        f"Unsupported or unrecognised scan file: {sig.path}. "
         f"Supported: {', '.join(SUPPORTED_SUFFIXES)}"
     )

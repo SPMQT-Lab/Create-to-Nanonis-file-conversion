@@ -25,10 +25,12 @@ __version__ = "beta"
 from probeflow.scan import Scan, load_scan
 from probeflow.metadata import ScanMetadata, read_scan_metadata, metadata_from_scan
 from probeflow.indexing import ProbeFlowItem, index_folder
+from probeflow.loaders import LoadSignature, identify_scan_file, identify_spectrum_file
 
 __all__ = [
     "Scan", "load_scan",
     "ScanMetadata", "read_scan_metadata", "metadata_from_scan",
     "ProbeFlowItem", "index_folder",
+    "LoadSignature", "identify_scan_file", "identify_spectrum_file",
     "__version__",
 ]

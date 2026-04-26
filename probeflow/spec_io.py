@@ -136,14 +136,13 @@ def read_spec_file(
     The file type is identified from its content signature, so callers can
     pass either vendor format without worrying about extensions.
     """
-    from probeflow.file_type import FileType, sniff_file_type
+    from probeflow.loaders import identify_spectrum_file
 
-    path = Path(path)
-    ft = sniff_file_type(path)
-    if ft == FileType.NANONIS_SPEC:
+    sig = identify_spectrum_file(path)
+    if sig.source_format == "nanonis_dat_spectrum":
         from probeflow.readers.nanonis_spec import read_nanonis_spec
-        return read_nanonis_spec(path)
-    return _read_createc_vert(path, time_trace_threshold_mv=time_trace_threshold_mv)
+        return read_nanonis_spec(sig.path)
+    return _read_createc_vert(sig.path, time_trace_threshold_mv=time_trace_threshold_mv)
 
 
 def read_spec_metadata(
@@ -152,19 +151,16 @@ def read_spec_metadata(
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
 ) -> SpecMetadata:
     """Read spectroscopy metadata without loading full numeric arrays."""
-    from probeflow.file_type import FileType, sniff_file_type
+    from probeflow.loaders import identify_spectrum_file
 
-    path = Path(path)
-    ft = sniff_file_type(path)
-    if ft == FileType.NANONIS_SPEC:
+    sig = identify_spectrum_file(path)
+    if sig.source_format == "nanonis_dat_spectrum":
         from probeflow.readers.nanonis_spec import read_nanonis_spec_metadata
-        return read_nanonis_spec_metadata(path)
-    if ft == FileType.CREATEC_SPEC:
-        return _read_createc_vert_metadata(
-            path,
-            time_trace_threshold_mv=time_trace_threshold_mv,
-        )
-    raise ValueError(f"{path.name}: not a recognised spectroscopy file")
+        return read_nanonis_spec_metadata(sig.path)
+    return _read_createc_vert_metadata(
+        sig.path,
+        time_trace_threshold_mv=time_trace_threshold_mv,
+    )
 
 
 def _read_createc_vert_metadata(
