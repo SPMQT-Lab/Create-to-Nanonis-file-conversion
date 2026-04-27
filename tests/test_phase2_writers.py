@@ -16,6 +16,7 @@ from probeflow.writers import (
     SUPPORTED_OUTPUT_SUFFIXES,
     save_scan,
     write_csv,
+    write_gwy,
     write_pdf,
 )
 
@@ -27,11 +28,11 @@ def dat_scan(first_sample_dat):
 
 class TestSupportedOutputSuffixes:
     def test_has_all_expected(self):
-        for s in (".sxm", ".png", ".pdf", ".csv"):
+        for s in (".sxm", ".gwy", ".png", ".pdf", ".csv"):
             assert s in SUPPORTED_OUTPUT_SUFFIXES
 
     def test_removed_suffixes_absent(self):
-        for s in (".tif", ".tiff", ".gwy"):
+        for s in (".tif", ".tiff"):
             assert s not in SUPPORTED_OUTPUT_SUFFIXES
 
 
@@ -72,6 +73,27 @@ class TestCsv:
         assert out.exists()
 
 
+class TestGwy:
+    def test_writes_file(self, dat_scan, tmp_path):
+        pytest.importorskip("gwyfile")
+        from gwyfile.objects import GwyContainer
+        out = tmp_path / "out.gwy"
+        plane_idx = 2
+        write_gwy(dat_scan, out, plane_idx=plane_idx)
+        assert out.exists() and out.stat().st_size > 4
+        assert out.read_bytes()[:4] == b"GWYP"
+        obj = GwyContainer.fromfile(str(out))
+        assert obj["/0/data/title"] == dat_scan.plane_names[plane_idx]
+        assert obj["/0/data"].data.shape == dat_scan.planes[plane_idx].shape
+        assert "/1/data" not in obj
+
+    def test_via_save_method(self, dat_scan, tmp_path):
+        pytest.importorskip("gwyfile")
+        out = tmp_path / "via_save.gwy"
+        dat_scan.save_gwy(out, plane_idx=1)
+        assert out.exists()
+
+
 class TestSaveScanDispatch:
     def test_unknown_suffix_raises(self, dat_scan, tmp_path):
         with pytest.raises(ValueError, match="Unsupported output"):
@@ -85,4 +107,10 @@ class TestSaveScanDispatch:
     def test_pdf_routes_correctly(self, dat_scan, tmp_path):
         out = tmp_path / "ok.pdf"
         save_scan(dat_scan, out, plane_idx=0, colormap="gray")
+        assert out.exists()
+
+    def test_gwy_routes_correctly(self, dat_scan, tmp_path):
+        pytest.importorskip("gwyfile")
+        out = tmp_path / "ok.gwy"
+        save_scan(dat_scan, out, plane_idx=3)
         assert out.exists()

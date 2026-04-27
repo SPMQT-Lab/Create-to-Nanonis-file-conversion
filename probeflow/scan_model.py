@@ -110,7 +110,12 @@ class Scan:
         from probeflow.writers.csv import write_csv
         write_csv(self, out_path, plane_idx=plane_idx, **kwargs)
 
+    def save_gwy(self, out_path, plane_idx: int = 0, **kwargs) -> None:
+        """Write this Scan to a Gwyddion ``.gwy`` file."""
+        from probeflow.writers.gwy import write_gwy
+        write_gwy(self, out_path, plane_idx=plane_idx, **kwargs)
+
     def save(self, out_path, plane_idx: int = 0, **kwargs) -> None:
-        """Suffix-driven save: ``.sxm`` / ``.png`` / ``.pdf`` / ``.csv``."""
+        """Suffix-driven save: ``.sxm`` / ``.gwy`` / ``.png`` / ``.pdf`` / ``.csv``."""
         from probeflow.writers import save_scan
         save_scan(self, out_path, plane_idx=plane_idx, **kwargs)

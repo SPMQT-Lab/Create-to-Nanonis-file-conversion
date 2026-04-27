@@ -1,7 +1,7 @@
 """
 Format writers that consume :class:`probeflow.scan.Scan` objects.
 
-Supported writers: ``.sxm``, ``.png``, ``.pdf``, ``.csv``.
+Supported writers: ``.sxm``, ``.gwy``, ``.png``, ``.pdf``, ``.csv``.
 
 Use :func:`save_scan` for a suffix-driven "write anything" dispatcher.
 """
@@ -15,14 +15,20 @@ from probeflow.writers.pdf import write_pdf
 from probeflow.writers.csv import write_csv
 
 __all__ = [
-    "write_sxm", "write_png", "write_pdf", "write_csv",
+    "write_sxm", "write_gwy", "write_png", "write_pdf", "write_csv",
     "save_scan", "SUPPORTED_OUTPUT_SUFFIXES",
 ]
 
 
 SUPPORTED_OUTPUT_SUFFIXES: Tuple[str, ...] = (
-    ".sxm", ".png", ".pdf", ".csv",
+    ".sxm", ".gwy", ".png", ".pdf", ".csv",
 )
+
+
+def write_gwy(scan, out_path, plane_idx: int = 0, **kwargs) -> None:
+    """Lazy wrapper for :func:`probeflow.writers.gwy.write_gwy`."""
+    from probeflow.writers.gwy import write_gwy as _write_gwy
+    _write_gwy(scan, out_path, plane_idx=plane_idx, **kwargs)
 
 
 def save_scan(scan, out_path, plane_idx: int = 0, **kwargs) -> None:
@@ -37,6 +43,8 @@ def save_scan(scan, out_path, plane_idx: int = 0, **kwargs) -> None:
 
     if suffix == ".sxm":
         write_sxm(scan, out_path)
+    elif suffix == ".gwy":
+        write_gwy(scan, out_path, plane_idx=plane_idx, **kwargs)
     elif suffix == ".png":
         write_png(scan, out_path, plane_idx=plane_idx, **kwargs)
     elif suffix == ".pdf":

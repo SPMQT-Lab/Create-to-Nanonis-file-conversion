@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev      = ["pytest"]
 features = ["opencv-python", "scikit-learn"]
+gwyddion = ["gwyfile"]
 
 [project.scripts]
 probeflow = "probeflow.cli:main"
