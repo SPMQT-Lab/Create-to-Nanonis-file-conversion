@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from probeflow.readers.createc_vert import read_createc_vert_report
 from probeflow.spec_io import SpecData, SpecMetadata, parse_spec_header, read_spec_file, read_spec_metadata
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -94,6 +95,170 @@ class TestReadSpecMetadata:
         meta = read_spec_metadata(VERT_TIME_TRACE)
         assert meta.metadata["sweep_type"] == time_trace_spec.metadata["sweep_type"]
         assert meta.metadata["n_points"] == time_trace_spec.metadata["n_points"]
+
+    def test_source_fingerprint_matches_full_reader(self, bias_sweep_spec):
+        meta = read_spec_metadata(VERT_BIAS_SWEEP)
+        full_source = bias_sweep_spec.metadata["source"]
+        metadata_source = meta.metadata["source"]
+        assert full_source["source_format"] == "createc_vert"
+        assert metadata_source["item_type"] == "spectrum"
+        assert metadata_source["sha256"] == full_source["sha256"]
+        assert len(metadata_source["sha256"]) == 64
+        assert metadata_source["file_size_bytes"] > 0
+        assert metadata_source["data_offset"] is not None
+
+
+# ─── Createc VERT report layer ───────────────────────────────────────────────
+
+class TestCreatecVertReport:
+    def test_real_fixture_report_has_source_and_points(self):
+        report = read_createc_vert_report(VERT_BIAS_SWEEP)
+        assert report.file_version in {"ParVERT30", "ParVERT32"}
+        assert report.raw_table_shape == (5000, 4)
+        assert report.spec_total_points == 5000
+        assert report.source["source_format"] == "createc_vert"
+        assert report.source["item_type"] == "spectrum"
+        assert len(report.source["sha256"]) == 64
+        assert report.source["data_offset"] == report.data_offset
+        assert report.raw_columns is not None
+        assert set(("idx", "V", "Z", "I")).issubset(report.raw_columns)
+
+    def test_metadata_fast_path_omits_arrays_but_keeps_summary(self):
+        report = read_createc_vert_report(VERT_BIAS_SWEEP, include_arrays=False)
+        assert report.raw_columns is None
+        assert report.raw_table_shape == (5000, 4)
+        assert [info.canonical_name for info in report.channel_info] == ["V", "Z", "I"]
+        assert [info.unit for info in report.channel_info] == ["V", "m", "A"]
+        assert report.bias_min_mv == pytest.approx(-300.0, abs=10.0)
+        assert report.bias_max_mv == pytest.approx(-50.0, abs=10.0)
+        assert len(report.source["sha256"]) == 64
+
+    def test_parvert30_base_columns(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "par30.VERT",
+            _createc_vert_text(
+                version="ParVERT30",
+                n_rows=2,
+                channel_code=1,
+                rows=[
+                    [0, -50.0, 10.0, -1000.0],
+                    [1, -60.0, 20.0, -2000.0],
+                ],
+            ),
+        )
+        report = read_createc_vert_report(f)
+        assert report.column_names == ("idx", "V", "Z", "I")
+        assert [info.origin for info in report.channel_info] == [
+            "base",
+            "base",
+            "bitmask",
+        ]
+
+    def test_parvert32_v2_base_columns(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "par32_v2.VERT",
+            _createc_vert_text(
+                version="ParVERT32",
+                n_rows=2,
+                channel_code=1,
+                rows=[
+                    [0, -50.0, 10.0, -1000.0],
+                    [1, -60.0, 20.0, -2000.0],
+                ],
+            ),
+        )
+        report = read_createc_vert_report(f)
+        assert report.output_channel_count_marker == "v2"
+        assert report.column_names == ("idx", "V", "Z", "I")
+
+    def test_parvert32_v3_includes_x_column(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "par32_v3.VERT",
+            _createc_vert_text(
+                version="ParVERT32",
+                n_rows=2,
+                channel_code=1,
+                marker=3,
+                rows=[
+                    [0, -50.0, 10.0, 101.0, -1000.0],
+                    [1, -60.0, 20.0, 102.0, -2000.0],
+                ],
+            ),
+        )
+        report = read_createc_vert_report(f)
+        assert report.output_channel_count_marker == "v3"
+        assert report.column_names == ("idx", "V", "Z", "X", "I")
+        assert "X" in [info.canonical_name for info in report.channel_info]
+
+    def test_bitmask_channels_are_exposed_in_order(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "bitmask.VERT",
+            _createc_vert_text(
+                n_rows=2,
+                channel_code=0b1011,
+                rows=[
+                    [0, -50.0, 0.0, -1000.0, 1.25, 2.5],
+                    [1, -60.0, 0.0, -2000.0, 1.50, 3.5],
+                ],
+            ),
+        )
+        report = read_createc_vert_report(f)
+        assert report.column_names == ("idx", "V", "Z", "I", "dI/dV", "ADC0")
+        assert [info.canonical_name for info in report.channel_info] == [
+            "V",
+            "Z",
+            "I",
+            "dI/dV",
+            "ADC0",
+        ]
+        assert any("dI/dV decoded without physical calibration" in w for w in report.warnings)
+        assert any("ADC0 decoded without physical calibration" in w for w in report.warnings)
+
+    def test_excess_columns_are_preserved_with_warning(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "extra.VERT",
+            _createc_vert_text(
+                n_rows=1,
+                channel_code=1,
+                rows=[[0, -50.0, 0.0, -1000.0, 42.0]],
+            ),
+        )
+        report = read_createc_vert_report(f)
+        assert report.column_names == ("idx", "V", "Z", "I", "Raw column 4")
+        assert "Raw column 4" in [info.canonical_name for info in report.channel_info]
+        assert any("preserved unrecognised spectroscopy column 4" in w for w in report.warnings)
+
+    def test_malformed_params_line_raises(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "bad_params.VERT",
+            "[ParVERT30]\r\nDATA\r\nnot params\r\n0\t-50\t0\t1\r\n",
+        )
+        with pytest.raises(ValueError, match="malformed.*params"):
+            read_createc_vert_report(f)
+
+    def test_missing_data_marker_raises(self, tmp_path):
+        f = _write_createc_vert(tmp_path, "missing.VERT", "[ParVERT30]\r\nkey=val\r\n")
+        with pytest.raises(ValueError, match="missing DATA marker"):
+            read_createc_vert_report(f)
+
+    def test_mismatched_column_count_raises(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "short_columns.VERT",
+            _createc_vert_text(
+                n_rows=1,
+                channel_code=0b11,
+                rows=[[0, -50.0, 0.0, -1000.0]],
+            ),
+        )
+        with pytest.raises(ValueError, match="expected at least 5 data columns"):
+            read_createc_vert_report(f)
 
 
 # ─── read_spec_file — time trace ─────────────────────────────────────────────
@@ -326,6 +491,41 @@ def _make_synthetic_vert(tmp_path, z_dac: float, i_dac: float, bias_mv: float = 
     return f
 
 
+def _createc_vert_text(
+    *,
+    version: str = "ParVERT30",
+    n_rows: int,
+    channel_code: int,
+    marker: int | None = None,
+    rows: list[list[float]],
+) -> str:
+    """Build a minimal synthetic Createc VERT fixture."""
+    hdr = (
+        f"[{version}]\r\n"
+        "DAC-Type=20bit\r\n"
+        "GainPre 10^=9\r\n"
+        "Dacto[A]xy=0.00083\r\n"
+        "Dacto[A]z=0.00018\r\n"
+        "OffsetX=0\r\nOffsetY=0\r\n"
+        "SpecFreq=1000\r\n"
+        "Vpoint0.t=0\r\nVpoint0.V=-50.0\r\n"
+        "Vpoint1.t=10\r\nVpoint1.V=-60.0\r\n"
+    )
+    params = f"    {n_rows}    0    0    {channel_code}"
+    if marker is not None:
+        params += f"    0    0    {marker}"
+    body = hdr + f"DATA\r\n{params}\r\n"
+    for row in rows:
+        body += "\t".join(str(v) for v in row) + "\r\n"
+    return body
+
+
+def _write_createc_vert(tmp_path, name: str, text: str) -> Path:
+    f = tmp_path / name
+    f.write_bytes(text.encode("latin-1"))
+    return f
+
+
 class TestSyntheticDACConversion:
     """Verify 2× DAC scale and sign convention with known raw values (#2/#22)."""
 
@@ -435,3 +635,46 @@ class TestChannelMetadata:
             assert ch in bias_sweep_spec.channels
         for ch in time_trace_spec.default_channels:
             assert ch in time_trace_spec.channels
+
+    def test_additional_decoded_channels_reach_specdata(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "extra_channels.VERT",
+            _createc_vert_text(
+                n_rows=2,
+                channel_code=0b1011,
+                rows=[
+                    [0, -50.0, 0.0, -1000.0, 1.25, 2.5],
+                    [1, -60.0, 0.0, -2000.0, 1.50, 3.5],
+                ],
+            ),
+        )
+        spec = read_spec_file(f)
+        assert spec.channel_order == ["I", "Z", "V", "dI/dV", "ADC0"]
+        assert spec.default_channels == ["I"]
+        assert set(spec.channels) == {"I", "Z", "V", "dI/dV", "ADC0"}
+        assert spec.y_units["dI/dV"] == "unknown"
+        assert spec.y_units["ADC0"] == "unknown"
+        np.testing.assert_allclose(spec.channels["dI/dV"], [1.25, 1.50])
+        np.testing.assert_allclose(spec.channels["ADC0"], [2.5, 3.5])
+        assert "source" in spec.metadata
+
+    def test_metadata_tracks_additional_decoded_channels(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "extra_metadata.VERT",
+            _createc_vert_text(
+                n_rows=2,
+                channel_code=0b1011,
+                rows=[
+                    [0, -50.0, 0.0, -1000.0, 1.25, 2.5],
+                    [1, -60.0, 0.0, -2000.0, 1.50, 3.5],
+                ],
+            ),
+        )
+        spec = read_spec_file(f)
+        meta = read_spec_metadata(f)
+        assert meta.channels == tuple(spec.channel_order)
+        assert meta.units == tuple(spec.y_units[ch] for ch in spec.channel_order)
+        assert meta.metadata["n_points"] == spec.metadata["n_points"]
+        assert meta.metadata["source"]["sha256"] == spec.metadata["source"]["sha256"]
