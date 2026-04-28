@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 import numpy as np
 
-from probeflow.scan_model import PLANE_CANON_NAMES, PLANE_CANON_UNITS, Scan
-from probeflow.sxm_io import read_all_sxm_planes, sxm_scan_range
+from probeflow.scan_model import Scan
+from probeflow.sxm_io import read_all_sxm_planes, sxm_plane_metadata, sxm_scan_range
 
 
 def read_sxm(path) -> Scan:
@@ -18,16 +17,8 @@ def read_sxm(path) -> Scan:
     if not planes:
         raise ValueError(f"{path}: no data planes could be read")
 
-    n = len(planes)
-    names = list(PLANE_CANON_NAMES[:n])
-    units = list(PLANE_CANON_UNITS[:n])
-    synthetic = [False] * n
-
-    # Pad names/units with placeholders if the file has an unusual plane count
-    while len(names) < n:
-        names.append(f"Channel {len(names)}")
-        units.append("")
-
+    names, units = sxm_plane_metadata(hdr, len(planes))
+    synthetic = [False] * len(planes)
     scan_range_m = sxm_scan_range(hdr)
 
     return Scan(

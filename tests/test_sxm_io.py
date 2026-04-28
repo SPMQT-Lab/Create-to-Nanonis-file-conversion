@@ -12,7 +12,9 @@ from probeflow.sxm_io import (
     parse_sxm_header,
     read_all_sxm_planes,
     read_sxm_plane,
+    sxm_data_info,
     sxm_dims,
+    sxm_plane_metadata,
     sxm_scan_range,
     write_sxm_with_planes,
 )
@@ -44,6 +46,33 @@ class TestHeader:
         hdr = parse_sxm_header(sample_sxm)
         w_m, h_m = sxm_scan_range(hdr)
         assert w_m > 0 and h_m > 0
+
+    def test_sxm_data_info_parses_saved_channels(self):
+        hdr = {
+            "DATA_INFO": (
+                "Channel Name Unit Direction Calibration Offset "
+                "14 Z m both 2.100E-8 0.000E+0 "
+                "0 Current A both -3.300E-10 1.662E-12 "
+                "18 OC_M1_Freq._Shift Hz both 1.526E+1 0.000E+0"
+            )
+        }
+        rows = sxm_data_info(hdr)
+        assert [row["name"] for row in rows] == [
+            "Z",
+            "Current",
+            "OC M1 Freq. Shift",
+        ]
+        assert [row["unit"] for row in rows] == ["m", "A", "Hz"]
+        names, units = sxm_plane_metadata(hdr, 6)
+        assert names == [
+            "Z forward",
+            "Z backward",
+            "Current forward",
+            "Current backward",
+            "OC M1 Freq. Shift forward",
+            "OC M1 Freq. Shift backward",
+        ]
+        assert units == ["m", "m", "A", "A", "Hz", "Hz"]
 
     def test_parse_missing_scanit_end_raises(self, tmp_path):
         bad = tmp_path / "truncated.sxm"

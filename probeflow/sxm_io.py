@@ -11,6 +11,7 @@ marker ``:SCANIT_END:``; the start of the binary block is recorded in
 
 The public API:
     parse_sxm_header(path) -> dict
+    sxm_data_info(hdr)     -> [(name, unit, direction), ...]
     sxm_dims(hdr)          -> (Nx, Ny)
     sxm_scan_range(hdr)    -> (width_m, height_m)
     orient_plane(arr, hdr, plane_idx) -> oriented array
@@ -154,6 +155,74 @@ def sxm_scan_range(hdr: dict) -> Tuple[float, float]:
     return (0.0, 0.0)
 
 
+def sxm_data_info(hdr: dict) -> list[dict[str, str]]:
+    """Return channel rows parsed from the Nanonis ``DATA_INFO`` header.
+
+    Nanonis stores this section as a tabular block, but ``parse_sxm_header``
+    normalises header continuation lines to spaces.  The useful schema is:
+    ``Channel Name Unit Direction Calibration Offset`` followed by one
+    six-token row per acquired signal.  The returned ``name`` is display
+    friendly, with Nanonis underscores converted back to spaces.
+    """
+    raw = str(hdr.get("DATA_INFO", "")).strip()
+    if not raw:
+        return []
+    toks = raw.split()
+    if "Offset" not in toks:
+        return []
+    start = toks.index("Offset") + 1
+    rows: list[dict[str, str]] = []
+    for i in range(start, len(toks), 6):
+        chunk = toks[i:i + 6]
+        if len(chunk) < 6:
+            break
+        _channel, name, unit, direction, calibration, offset = chunk
+        rows.append(
+            {
+                "name": _display_channel_name(name),
+                "unit": unit,
+                "direction": direction.lower(),
+                "calibration": calibration,
+                "offset": offset,
+            }
+        )
+    return rows
+
+
+def sxm_plane_metadata(hdr: dict, n_planes: int) -> tuple[list[str], list[str]]:
+    """Return plane names and units for the decoded SXM payload planes."""
+    rows = sxm_data_info(hdr)
+    names: list[str] = []
+    units: list[str] = []
+
+    for row in rows:
+        base = row["name"]
+        unit = row["unit"]
+        direction = row["direction"]
+        if direction == "both":
+            directions = ("forward", "backward")
+        elif direction in {"forward", "forw", "fwd"}:
+            directions = ("forward",)
+        elif direction in {"backward", "backw", "bwd"}:
+            directions = ("backward",)
+        else:
+            directions = (direction,) if direction else ("",)
+        for d in directions:
+            label = f"{base} {d}".strip()
+            names.append(label)
+            units.append(unit)
+
+    while len(names) < n_planes:
+        names.append(f"Channel {len(names)}")
+        units.append("")
+
+    return names[:n_planes], units[:n_planes]
+
+
+def _display_channel_name(name: str) -> str:
+    return name.replace("_", " ")
+
+
 # ── Plane orientation ────────────────────────────────────────────────────────
 
 def orient_plane(arr: np.ndarray, hdr: dict, plane_idx: int) -> np.ndarray:
@@ -208,14 +277,15 @@ def read_all_sxm_planes(
     orient: bool = True,
     cushion_dir: Optional[Path] = None,
 ) -> Tuple[dict, List[np.ndarray]]:
-    """Return (header_dict, [plane0, plane1, plane2, plane3])."""
+    """Return ``(header_dict, planes)`` for all payload planes in an SXM file."""
     hdr = parse_sxm_header(sxm_path)
     Nx, Ny = sxm_dims(hdr)
     raw = Path(sxm_path).read_bytes()
     offset = _data_offset_in_file(raw, cushion_dir)
     plane_bytes = Ny * Nx * 4
     planes: List[np.ndarray] = []
-    for idx in range(4):
+    n_planes = (len(raw) - offset) // plane_bytes
+    for idx in range(n_planes):
         start = offset + idx * plane_bytes
         if start + plane_bytes > len(raw):
             break
@@ -299,8 +369,6 @@ def write_sxm_with_planes(
     n_planes_src = 0
     while offset + (n_planes_src + 1) * plane_bytes <= len(raw):
         n_planes_src += 1
-        if n_planes_src >= 4:
-            break
     if n_planes_src == 0:
         raise ValueError(f"{src_sxm}: no data planes detected")
 

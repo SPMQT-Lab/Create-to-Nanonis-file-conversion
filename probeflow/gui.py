@@ -2294,6 +2294,8 @@ class ImageViewerDialog(QDialog):
         self._scan_range_m: Optional[tuple] = None
         self._scan_shape: Optional[tuple] = None
         self._scan_format: str = ""
+        self._scan_plane_names: list[str] = list(PLANE_NAMES)
+        self._scan_plane_units: list[str] = ["m", "m", "A", "A"]
         self._roi_rect_px: Optional[tuple[int, int, int, int]] = None
         self._zero_pick_mode: str = "offset"
         self._zero_plane_points_px: list[tuple[int, int]] = []
@@ -2745,18 +2747,23 @@ class ImageViewerDialog(QDialog):
         # load raw array; compute display array (with processing if active)
         try:
             _scan = load_scan(entry.path)
+            self._set_scan_channel_choices(_scan)
             idx = self._ch_cb.currentIndex()
             self._raw_arr = _scan.planes[idx] if idx < _scan.n_planes else None
             self._scan_header  = _scan.header or {}
             self._scan_range_m = _scan.scan_range_m
             self._scan_shape   = _scan.planes[0].shape if _scan.planes else None
             self._scan_format  = entry.source_format
+            self._scan_plane_names = list(_scan.plane_names)
+            self._scan_plane_units = list(_scan.plane_units)
         except Exception:
             self._raw_arr      = None
             self._scan_header  = {}
             self._scan_range_m = None
             self._scan_shape   = None
             self._scan_format  = ""
+            self._scan_plane_names = list(PLANE_NAMES)
+            self._scan_plane_units = ["m", "m", "A", "A"]
         # display array: raw with processing applied (no grain overlay — that's visual only)
         if self._raw_arr is not None and self._processing:
             try:
@@ -2780,12 +2787,28 @@ class ImageViewerDialog(QDialog):
         self._pool.start(loader)
 
     def _channel_unit(self) -> tuple[float, str, str]:
-        """Return (scale, unit_label, axis_label) for the current channel.
-        Z channels (0,1) → Å; current channels (2,3) → pA."""
+        """Return (scale, unit_label, axis_label) for the current channel."""
         idx = self._ch_cb.currentIndex()
-        if idx < 2:
-            return 1e10, "Å", "Height"
-        return 1e12, "pA", "Current"
+        unit = self._scan_plane_units[idx] if idx < len(self._scan_plane_units) else ""
+        name = self._scan_plane_names[idx] if idx < len(self._scan_plane_names) else self._ch_cb.currentText()
+        arr = self._display_arr if self._display_arr is not None else self._raw_arr
+        from probeflow.spec_plot import choose_display_unit
+        scale, unit_label = choose_display_unit(unit, arr)
+        axis_label = name.rsplit(" ", 1)[0] if name.endswith((" forward", " backward")) else name
+        return scale, unit_label, axis_label
+
+    def _set_scan_channel_choices(self, scan) -> None:
+        names = list(scan.plane_names) if scan.plane_names else [
+            f"Channel {i}" for i in range(scan.n_planes)
+        ]
+        current = self._ch_cb.currentIndex()
+        if [self._ch_cb.itemText(i) for i in range(self._ch_cb.count())] == names:
+            return
+        self._ch_cb.blockSignals(True)
+        self._ch_cb.clear()
+        self._ch_cb.addItems(names)
+        self._ch_cb.setCurrentIndex(max(0, min(current, len(names) - 1)))
+        self._ch_cb.blockSignals(False)
 
     def _update_histogram(self):
         # Use processed display array so histogram tracks what the user sees
@@ -3430,7 +3453,7 @@ class ImageViewerDialog(QDialog):
                     provenance = build_scan_export_provenance(
                         _scan,
                         channel_index=ch_idx,
-                        channel_name=PLANE_NAMES[ch_idx] if 0 <= ch_idx < len(PLANE_NAMES) else None,
+                        channel_name=self._ch_cb.currentText() or None,
                         processing_state=ps,
                         display_state=png_display_state(
                             self._drs,
@@ -4028,30 +4051,14 @@ class BrowseInfoPanel(QWidget):
         ch_hdr.setFont(QFont("Helvetica", 11, QFont.Bold))
         lay.addWidget(ch_hdr)
 
-        ch_grid = QGridLayout()
-        ch_grid.setSpacing(8)
-        ch_grid.setContentsMargins(0, 0, 0, 0)
+        self._ch_grid = QGridLayout()
+        self._ch_grid.setSpacing(8)
+        self._ch_grid.setContentsMargins(0, 0, 0, 0)
+        self._ch_cells: list[QWidget] = []
         self._ch_img_lbls:  list[QLabel] = []
         self._ch_name_lbls: list[QLabel] = []
-        for i, name in enumerate(PLANE_NAMES):
-            r, c = divmod(i, 2)
-            cell = QWidget()
-            cell_lay = QVBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(2)
-            img_lbl = QLabel()
-            img_lbl.setFixedSize(128, 102)
-            img_lbl.setAlignment(Qt.AlignCenter)
-            img_lbl.setFrameShape(QFrame.StyledPanel)
-            nm_lbl = QLabel(name)
-            nm_lbl.setFont(QFont("Helvetica", 9))
-            nm_lbl.setAlignment(Qt.AlignCenter)
-            cell_lay.addWidget(img_lbl)
-            cell_lay.addWidget(nm_lbl)
-            ch_grid.addWidget(cell, r, c)
-            self._ch_img_lbls.append(img_lbl)
-            self._ch_name_lbls.append(nm_lbl)
-        lay.addLayout(ch_grid)
+        self._set_channel_preview_slots(PLANE_NAMES)
+        lay.addLayout(self._ch_grid)
         lay.addWidget(_sep())
 
         # Full metadata is hidden behind a toggle. The quick-info grid above
@@ -4168,7 +4175,15 @@ class BrowseInfoPanel(QWidget):
         sigs = ChannelSignals()
         sigs.loaded.connect(self._on_ch_loaded)
         self._ch_sigs = sigs
-        for i in range(4):
+        try:
+            scan = load_scan(entry.path)
+            plane_names = list(scan.plane_names)
+            n_planes = scan.n_planes
+        except Exception:
+            plane_names = list(PLANE_NAMES)
+            n_planes = len(plane_names)
+        self._set_channel_preview_slots(plane_names)
+        for i in range(n_planes):
             loader = ChannelLoader(entry, i, colormap_key,
                                    self._ch_token, 124, 98, sigs,
                                    self._clip_low, self._clip_high,
@@ -4182,9 +4197,46 @@ class BrowseInfoPanel(QWidget):
     def _on_ch_loaded(self, idx: int, pixmap: QPixmap, token):
         if token is not self._ch_token:
             return
+        if idx >= len(self._ch_img_lbls):
+            return
         lbl = self._ch_img_lbls[idx]
         lbl.setPixmap(pixmap.scaled(lbl.width(), lbl.height(),
                                     Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _set_channel_preview_slots(self, names: list[str]) -> None:
+        names = names or PLANE_NAMES
+        if [lbl.text() for lbl in self._ch_name_lbls] == names:
+            for lbl in self._ch_img_lbls:
+                lbl.clear()
+                lbl.setText("—")
+            return
+        for cell in self._ch_cells:
+            self._ch_grid.removeWidget(cell)
+            cell.deleteLater()
+        self._ch_cells.clear()
+        self._ch_img_lbls.clear()
+        self._ch_name_lbls.clear()
+        for i, name in enumerate(names):
+            r, c = divmod(i, 2)
+            cell = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(2)
+            img_lbl = QLabel()
+            img_lbl.setFixedSize(128, 102)
+            img_lbl.setAlignment(Qt.AlignCenter)
+            img_lbl.setFrameShape(QFrame.StyledPanel)
+            img_lbl.setText("—")
+            nm_lbl = QLabel(name)
+            nm_lbl.setFont(QFont("Helvetica", 9))
+            nm_lbl.setAlignment(Qt.AlignCenter)
+            nm_lbl.setWordWrap(True)
+            cell_lay.addWidget(img_lbl)
+            cell_lay.addWidget(nm_lbl)
+            self._ch_grid.addWidget(cell, r, c)
+            self._ch_cells.append(cell)
+            self._ch_img_lbls.append(img_lbl)
+            self._ch_name_lbls.append(nm_lbl)
 
     def _load_metadata(self, entry: SxmFile):
         try:
