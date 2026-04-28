@@ -1,4 +1,4 @@
-"""Convert Nanonis .dat files to .sxm format.
+"""Convert Createc .dat image files to .sxm format.
 
 Authors: rnpla, GCampi
 """
@@ -331,9 +331,10 @@ def process_dat(
     """Parse .dat, scale to SI, trim, clip, and return header + image planes."""
     report = read_createc_dat_report(dat, include_raw=True)
     dat_hdr = dict(report.header)
-    stack = report.raw_channels_dac
-    if stack is None:
+    raw_stack = report.raw_channels_dac
+    if raw_stack is None:
         raise ValueError(f"{dat.name}: internal decode report has no image data")
+    stack = np.array(raw_stack, copy=True)
     num_chan = report.detected_channel_count
     log.info("%s: %d channels detected", dat.name, num_chan)
 
@@ -351,17 +352,11 @@ def process_dat(
     for k in range(num_chan):
         stack[k] = (stack[k] * (zs if k % 2 == 0 else is_)).astype(np.float32)
 
-    # Equalisatoin and trimming not applied to raw data.
-    # Baseline shift (equalise) then percentile clip for .sxm storage
-    #stack = stack - stack.min()
-    #for i in range(num_chan):
-    #    lo, hi = percentile_clip(stack[i], clip_low, clip_high)
-    #    stack[i] = np.clip(stack[i], lo, hi)
-
     FT = stack[0]
     FC = stack[1]
     if num_chan == 2:
-        # Mirror forward to synthesise backward planes
+        # SXM stores backward scan rows in acquisition order.  The SXM reader
+        # flips them back to display order, so this round-trips to read_dat().
         BT = np.fliplr(stack[0])
         BC = np.fliplr(stack[1])
         log.warning(

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import zlib
+
+import numpy as np
 import pytest
 
+from probeflow.dat_sxm import convert_dat_to_sxm
 from probeflow.metadata import read_scan_metadata
-from probeflow.readers.createc_dat import read_createc_dat_report
+from probeflow.readers.createc_dat import (
+    read_createc_dat_report,
+    scale_channels_for_scan,
+)
 from probeflow.scan import load_scan
 
 
@@ -38,6 +45,14 @@ def test_report_header_only_omits_arrays_but_keeps_corrected_shape(first_sample_
 def test_report_preserves_legacy_channel_detection_order(sample_dat_files):
     """Trailing floats must not make legacy 2-channel files look like 4+."""
 
+    four_channel = [
+        path
+        for path in sample_dat_files
+        if (
+            read_createc_dat_report(path, include_raw=False).detected_channel_count
+            == 4
+        )
+    ]
     two_channel = [
         path
         for path in sample_dat_files
@@ -46,7 +61,56 @@ def test_report_preserves_legacy_channel_detection_order(sample_dat_files):
             == 2
         )
     ]
+    assert four_channel, "sample data should include a legacy 4-channel DAT"
     assert two_channel, "sample data should include a legacy 2-channel DAT"
+
+
+def test_scale_channels_for_scan_applies_channel_scale_factors(first_sample_dat):
+    report = read_createc_dat_report(first_sample_dat)
+    scaled = scale_channels_for_scan(report)
+
+    assert report.raw_channels_dac is not None
+    assert np.allclose(
+        scaled[0],
+        report.raw_channels_dac[0] * report.scale_factors["z_m_per_dac"],
+    )
+    assert np.allclose(
+        scaled[1],
+        report.raw_channels_dac[1] * report.scale_factors["current_a_per_dac"],
+    )
+
+
+def test_2_channel_dat_roundtrip_preserves_synthetic_backward(
+    sample_dat_files, tmp_path, cushion_dir
+):
+    two_channel = next(
+        path
+        for path in sample_dat_files
+        if (
+            read_createc_dat_report(path, include_raw=False).detected_channel_count
+            == 2
+        )
+    )
+
+    direct = load_scan(two_channel)
+    convert_dat_to_sxm(two_channel, tmp_path, cushion_dir)
+    converted = load_scan(next(tmp_path.glob("*.sxm")))
+
+    assert np.array_equal(direct.planes[1], converted.planes[1])
+    assert np.array_equal(direct.planes[3], converted.planes[3])
+
+
+def test_exact_non_stm_channel_count_and_raw_fallback(tmp_path):
+    dat = tmp_path / "nine_channels.dat"
+    header = b"[Paramco32]\nNum.X=2\nNum.Y=2\n"
+    payload = np.arange(1, 37, dtype="<f4").tobytes()
+    dat.write_bytes(header + b"DATA" + zlib.compress(payload))
+
+    report = read_createc_dat_report(dat, include_raw=False)
+
+    assert report.detected_channel_count == 9
+    assert report.channel_info[-1].name == "Raw channel 8"
+    assert report.channel_info[-1].unit == "DAC"
 
 
 def test_metadata_uses_createc_report_without_constructing_scan(

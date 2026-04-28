@@ -202,11 +202,19 @@ def _detect_channel_count(payload_float_count: int, Ny: int, Nx: int) -> int:
 
     ProbeFlow historically tries 4 channels first, then 2.  Keep that order
     because Createc files often include decompressed tail floats that are not
-    image channels and can otherwise look like extra planes.
+    image channels and can otherwise look like extra planes.  Exact non-STM
+    channel counts are still accepted when there is no tail ambiguity.
     """
 
     pixels = Ny * Nx
-    for n in (4, 2, 8, 6, 3, 1):
+    if pixels <= 0:
+        raise ValueError(f"Invalid image dimensions Ny={Ny}, Nx={Nx}")
+
+    exact, tail = divmod(payload_float_count, pixels)
+    if tail == 0 and exact > 0 and exact not in (2, 4):
+        return exact
+
+    for n in (4, 2, 1):
         if payload_float_count >= n * pixels:
             return n
     raise ValueError(

@@ -29,7 +29,6 @@ Orientation:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 import numpy as np
 
@@ -70,10 +69,10 @@ def read_dat(path) -> Scan:
         plane_units = [info.unit for info in report.channel_info]
         planes = scaled
 
-    def _orient(arr: np.ndarray) -> np.ndarray:
+    def _as_f64(arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=np.float64)
 
-    oriented_planes: List[np.ndarray] = [_orient(arr) for arr in planes]
+    oriented_planes: list[np.ndarray] = [_as_f64(arr) for arr in planes]
 
     return Scan(
         planes=oriented_planes,
