@@ -323,12 +323,36 @@ class TestViewerRenderSizing:
         dlg._zoom_lbl.zoom_by(0.5)
         qapp.processEvents()
 
-        dlg._low_sl.setValue(2)
-        dlg._high_sl.setValue(98)
-        dlg._on_slider_clip()
+        dlg._drs.set_percentile(2.0, 98.0)
+        dlg._refresh_display_range()
         qapp.processEvents()
 
         assert dlg._zoom_lbl.zoom() == 0.5
+
+        dlg.close()
+        dlg.deleteLater()
+
+    def test_viewer_histogram_bounds_stay_visible_at_full_range(self, qapp, monkeypatch):
+        from probeflow.gui import ImageViewerDialog, THEMES
+
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan")
+        dlg = ImageViewerDialog(entry, [entry], "gray", THEMES["dark"])
+        dlg._raw_arr = np.arange(100, dtype=float).reshape(10, 10)
+        dlg._display_arr = dlg._raw_arr
+        dlg._scan_plane_names = ["Z forward"]
+        dlg._scan_plane_units = ["m"]
+        dlg._drs.set_percentile(0.0, 100.0)
+
+        dlg._update_histogram()
+
+        x0, x1 = dlg._ax.get_xlim()
+        low_x = dlg._low_line.get_xdata()[0]
+        high_x = dlg._high_line.get_xdata()[0]
+
+        assert x0 < low_x < x1
+        assert x0 < high_x < x1
 
         dlg.close()
         dlg.deleteLater()

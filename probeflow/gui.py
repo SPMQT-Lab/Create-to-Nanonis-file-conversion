@@ -2456,43 +2456,12 @@ class ImageViewerDialog(QDialog):
         self._canvas.mpl_connect("motion_notify_event",  self._on_hist_motion)
         self._canvas.mpl_connect("button_release_event", self._on_hist_release)
 
-        right_lay.addWidget(_sep())
-
-        # clip sliders (percentile — live)
-        clip_lbl = QLabel("Clip (percentile)")
-        clip_lbl.setFont(QFont("Helvetica", 9, QFont.Bold))
-        right_lay.addWidget(clip_lbl)
-
-        def _make_clip_row(label, init_val, mn, mx):
-            row = QHBoxLayout()
-            l = QLabel(label)
-            l.setFont(QFont("Helvetica", 8))
-            l.setFixedWidth(32)
-            sl = QSlider(Qt.Horizontal)
-            sl.setRange(mn, mx)
-            sl.setValue(int(init_val))
-            vl = QLabel(f"{int(init_val)}%")
-            vl.setFont(QFont("Helvetica", 8))
-            vl.setFixedWidth(32)
-            sl.valueChanged.connect(lambda v, vl=vl: vl.setText(f"{v}%"))
-            row.addWidget(l)
-            row.addWidget(sl, 1)
-            row.addWidget(vl)
-            right_lay.addLayout(row)
-            return sl
-
-        self._low_sl  = _make_clip_row("Low:", self._clip_low,   0,  20)
-        self._high_sl = _make_clip_row("High:", self._clip_high, 80, 100)
-        # live update on release (avoid re-rendering on every intermediate tick)
-        self._low_sl.sliderReleased.connect(self._on_slider_clip)
-        self._high_sl.sliderReleased.connect(self._on_slider_clip)
-
-        # Auto-reset button
+        # Histogram actions
         auto_row = QHBoxLayout()
-        auto_btn = QPushButton("Auto")
+        auto_btn = QPushButton("Reset bounds")
         auto_btn.setFont(QFont("Helvetica", 8))
         auto_btn.setFixedHeight(22)
-        auto_btn.setToolTip("Reset to 1%–99% percentile autoscale")
+        auto_btn.setToolTip("Reset bounds to 1%–99% percentile autoscale")
         auto_btn.clicked.connect(self._on_auto_clip)
         hist_export_btn = QPushButton("Export histogram…")
         hist_export_btn.setFont(QFont("Helvetica", 8))
@@ -2505,7 +2474,7 @@ class ImageViewerDialog(QDialog):
         auto_row.addWidget(auto_btn)
         right_lay.addLayout(auto_row)
 
-        # Å / pA value readout for current clip
+        # Å / pA value readout for current display bounds
         self._clip_val_lbl = QLabel("")
         self._clip_val_lbl.setFont(QFont("Helvetica", 8))
         self._clip_val_lbl.setAlignment(Qt.AlignCenter)
@@ -2937,7 +2906,11 @@ class ImageViewerDialog(QDialog):
                      alpha=0.85, linewidth=0)
         self._ax.set_yscale("log")
         if x_min is not None:
-            self._ax.set_xlim(x_min, x_max)
+            x0 = min(float(x_min), float(lo_phys), float(hi_phys))
+            x1 = max(float(x_max), float(lo_phys), float(hi_phys))
+            span = x1 - x0
+            pad = 0.02 * span if span > 0 else max(abs(x0) * 0.02, 1.0)
+            self._ax.set_xlim(x0 - pad, x1 + pad)
         self._low_line  = self._ax.axvline(lo_phys, color="#f38ba8",
                                             linewidth=1.6, picker=6)
         self._high_line = self._ax.axvline(hi_phys, color="#a6e3a1",
@@ -3295,23 +3268,11 @@ class ImageViewerDialog(QDialog):
         self._dragging = None
         self._refresh_display_range()
 
-    def _on_slider_clip(self):
-        self._clip_low  = float(self._low_sl.value())
-        self._clip_high = float(self._high_sl.value())
-        self._drs.set_percentile(self._clip_low, self._clip_high)
-        self._refresh_display_range()
-
     def _on_auto_clip(self):
         """Reset to 1%–99% percentile autoscale."""
         self._drs.reset()
         self._clip_low  = 1.0
         self._clip_high = 99.0
-        self._low_sl.blockSignals(True)
-        self._high_sl.blockSignals(True)
-        self._low_sl.setValue(1)
-        self._high_sl.setValue(99)
-        self._low_sl.blockSignals(False)
-        self._high_sl.blockSignals(False)
         self._refresh_display_range()
 
     def _on_export_histogram(self):
