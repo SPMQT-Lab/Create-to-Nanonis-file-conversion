@@ -50,7 +50,7 @@ class TestCreatecScans:
         for it in items:
             if it.source_format == "createc_dat":
                 assert isinstance(it.channels, tuple)
-                assert len(it.channels) == 4
+                assert len(it.channels) >= 4
 
     def test_scan_range_positive(self):
         items = index_folder(TESTDATA)
@@ -59,6 +59,16 @@ class TestCreatecScans:
                 assert it.scan_range is not None
                 w, h = it.scan_range
                 assert w > 0 and h > 0
+
+    def test_experiment_metadata_present(self):
+        items = index_folder(TESTDATA)
+        dat_items = [it for it in items if it.source_format == "createc_dat"]
+        assert dat_items
+        assert all("experiment_metadata" in it.metadata for it in dat_items)
+        assert any(
+            it.metadata["experiment_metadata"]["acquisition_mode"] == "stm"
+            for it in dat_items
+        )
 
 
 # ── Test B: Nanonis SXM fixture ───────────────────────────────────────────────
@@ -201,6 +211,12 @@ class TestProbeFlowItemContract:
         items = index_folder(TESTDATA)
         spectra = [it for it in items if it.item_type == "spectrum"]
         assert len(spectra) >= 3  # at least the three .VERT files
+
+    def test_spectrum_measurement_metadata_present(self):
+        items = index_folder(TESTDATA)
+        spectra = [it for it in items if it.source_format == "createc_vert"]
+        assert spectra
+        assert all("measurement_family" in it.metadata for it in spectra)
 
     def test_spectrum_indexing_does_not_call_full_reader(self, tmp_path, monkeypatch):
         shutil.copy(_CREATEC_VERT, tmp_path / _CREATEC_VERT.name)

@@ -403,6 +403,8 @@ class _ZoomLabel(QLabel):
                 if abs(pos.x() - sx) <= 10 and abs(pos.y() - sy) <= 10:
                     entry = m["entry"]
                     lines = [entry.stem]
+                    if getattr(entry, "measurement_label", None):
+                        lines.append(entry.measurement_label)
                     if entry.sweep_type and entry.sweep_type != "unknown":
                         lines.append(entry.sweep_type)
                     if entry.bias_mv is not None:

@@ -148,7 +148,7 @@ class SpecCard(_BrowseCard):
     def __init__(self, entry: VertFile, t: dict, parent=None):
         sweep = entry.sweep_type.replace("_", " ") if entry.sweep_type != "unknown" else "VERT"
         pts   = f"{entry.n_points} pts" if entry.n_points else ""
-        meta  = "  |  ".join(filter(None, [sweep, pts]))
+        meta  = "  |  ".join(filter(None, [entry.measurement_label, sweep, pts]))
         super().__init__(entry, t, meta, parent=parent)
 
 

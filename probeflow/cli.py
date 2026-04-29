@@ -1030,6 +1030,11 @@ def _cmd_spec_info(args) -> int:
         out = {
             "file": str(args.input),
             "sweep_type": spec.metadata["sweep_type"],
+            "measurement_family": spec.metadata.get("measurement_family"),
+            "feedback_mode": spec.metadata.get("feedback_mode"),
+            "derivative_label": spec.metadata.get("derivative_label"),
+            "measurement_confidence": spec.metadata.get("measurement_confidence"),
+            "measurement_evidence": spec.metadata.get("measurement_evidence"),
             "n_points": spec.metadata["n_points"],
             "channels": list(spec.channels.keys()),
             "x_label": spec.x_label,
@@ -1041,6 +1046,12 @@ def _cmd_spec_info(args) -> int:
     else:
         print(f"file        : {args.input}")
         print(f"sweep type  : {spec.metadata['sweep_type']}")
+        if spec.metadata.get("measurement_family"):
+            print(f"measurement : {spec.metadata['measurement_family']}")
+        if spec.metadata.get("feedback_mode"):
+            print(f"feedback    : {spec.metadata['feedback_mode']}")
+        if spec.metadata.get("derivative_label"):
+            print(f"derivative  : {spec.metadata['derivative_label']}")
         print(f"n_points    : {spec.metadata['n_points']}")
         print(f"channels    : {', '.join(spec.channels)}")
         print(f"x_axis      : {spec.x_label}")

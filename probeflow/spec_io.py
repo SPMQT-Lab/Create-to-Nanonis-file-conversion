@@ -10,6 +10,10 @@ from typing import Any, Union
 import numpy as np
 
 from .common import _f, find_hdr
+from .createc_interpretation import (
+    createc_vert_measurement_metadata,
+    normalize_measurement_mode,
+)
 from .readers.createc_vert import (
     CreatecVertDecodeReport,
     detect_createc_vert_time_trace,
@@ -117,6 +121,7 @@ def read_spec_file(
     path: Union[str, Path],
     *,
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
+    measurement_mode: str | None = None,
 ) -> SpecData:
     """Read a spectroscopy file (Createc .VERT or Nanonis .dat) into SpecData.
 
@@ -128,14 +133,21 @@ def read_spec_file(
     sig = identify_spectrum_file(path)
     if sig.source_format == "nanonis_dat_spectrum":
         from probeflow.readers.nanonis_spec import read_nanonis_spec
-        return read_nanonis_spec(sig.path)
-    return _read_createc_vert(sig.path, time_trace_threshold_mv=time_trace_threshold_mv)
+        spec = read_nanonis_spec(sig.path)
+        _apply_measurement_override(spec.metadata, measurement_mode)
+        return spec
+    return _read_createc_vert(
+        sig.path,
+        time_trace_threshold_mv=time_trace_threshold_mv,
+        measurement_mode=measurement_mode,
+    )
 
 
 def read_spec_metadata(
     path: Union[str, Path],
     *,
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
+    measurement_mode: str | None = None,
 ) -> SpecMetadata:
     """Read spectroscopy metadata without loading full numeric arrays."""
     from probeflow.loaders import identify_spectrum_file
@@ -143,10 +155,13 @@ def read_spec_metadata(
     sig = identify_spectrum_file(path)
     if sig.source_format == "nanonis_dat_spectrum":
         from probeflow.readers.nanonis_spec import read_nanonis_spec_metadata
-        return read_nanonis_spec_metadata(sig.path)
+        meta = read_nanonis_spec_metadata(sig.path)
+        _apply_measurement_override(meta.metadata, measurement_mode)
+        return meta
     return _read_createc_vert_metadata(
         sig.path,
         time_trace_threshold_mv=time_trace_threshold_mv,
+        measurement_mode=measurement_mode,
     )
 
 
@@ -154,12 +169,14 @@ def _read_createc_vert_metadata(
     path: Path,
     *,
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
+    measurement_mode: str | None = None,
 ) -> SpecMetadata:
     """Read Createc .VERT metadata without materialising channel arrays."""
     report = read_createc_vert_report(path, include_arrays=False)
     metadata, bias, comment, position, order, units = _metadata_from_vert_report(
         report,
         time_trace_threshold_mv=time_trace_threshold_mv,
+        measurement_mode=measurement_mode,
     )
     return SpecMetadata(
         path=path,
@@ -179,6 +196,7 @@ def _metadata_from_vert_report(
     report: CreatecVertDecodeReport,
     *,
     time_trace_threshold_mv: float,
+    measurement_mode: str | None = None,
 ) -> tuple[
     dict[str, Any],
     float | None,
@@ -219,6 +237,10 @@ def _metadata_from_vert_report(
         for info in report.channel_info
         if info.canonical_name in order
     }
+    measurement = createc_vert_measurement_metadata(
+        report,
+        measurement_mode=measurement_mode,
+    )
 
     metadata: dict[str, Any] = {
         "filename": report.path.name,
@@ -240,6 +262,11 @@ def _metadata_from_vert_report(
             "column_names": list(report.column_names),
             "warnings": list(report.warnings),
         },
+        "measurement_family": measurement["measurement_family"],
+        "feedback_mode": measurement["feedback_mode"],
+        "derivative_label": measurement["derivative_label"],
+        "measurement_confidence": measurement["confidence"],
+        "measurement_evidence": list(measurement["evidence"]),
     }
 
     return (
@@ -299,6 +326,7 @@ def _read_createc_vert(
     path: Path,
     *,
     time_trace_threshold_mv: float = _TIME_TRACE_THRESHOLD_MV,
+    measurement_mode: str | None = None,
 ) -> SpecData:
     """Read a Createc .VERT spectroscopy file and return a SpecData object.
 
@@ -315,6 +343,7 @@ def _read_createc_vert(
         _metadata_from_vert_report(
             report,
             time_trace_threshold_mv=time_trace_threshold_mv,
+            measurement_mode=measurement_mode,
         )
     )
 
@@ -352,3 +381,38 @@ def _read_createc_vert(
         channel_order=channel_order,
         default_channels=_default_spec_channels(channel_order),
     )
+
+
+def _apply_measurement_override(
+    metadata: dict[str, Any],
+    measurement_mode: str | None,
+) -> None:
+    """Populate generic spectroscopy measurement metadata for non-Createc paths."""
+
+    mode = normalize_measurement_mode(measurement_mode)
+    if mode == "iz":
+        metadata.update(
+            {
+                "measurement_family": "iz",
+                "feedback_mode": "on",
+                "derivative_label": "dI/dz",
+                "measurement_confidence": "override",
+                "measurement_evidence": ["measurement_mode override: iz"],
+            }
+        )
+        return
+    if mode == "sts" or "measurement_family" not in metadata:
+        metadata.update(
+            {
+                "measurement_family": "sts",
+                "feedback_mode": metadata.get("feedback_mode", "unknown"),
+                "derivative_label": metadata.get("derivative_label", "dI/dV"),
+                "measurement_confidence": (
+                    "override" if mode == "sts" else metadata.get(
+                        "measurement_confidence",
+                        "low",
+                    )
+                ),
+                "measurement_evidence": metadata.get("measurement_evidence", []),
+            }
+        )

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from probeflow.common import _f
+from probeflow.createc_interpretation import createc_dat_experiment_metadata
 
 
 # ── ScanMetadata dataclass ────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ class ScanMetadata:
     comment: Optional[str] = None
     acquisition_datetime: Optional[str] = None
     raw_header: dict[str, Any] = field(default_factory=dict)
+    experiment_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Format string mapping ────────────────────────────────────────────────────
@@ -68,10 +70,13 @@ def metadata_from_scan(scan) -> ScanMetadata:
 
     if scan.source_format == "dat":
         bias, setpoint, comment, acq_dt = _extract_createc_fields(hdr)
+        experiment_metadata = dict(getattr(scan, "experiment_metadata", {}) or {})
     elif scan.source_format == "sxm":
         bias, setpoint, comment, acq_dt = _extract_nanonis_fields(hdr)
+        experiment_metadata = {}
     else:
         bias, setpoint, comment, acq_dt = None, None, None, None
+        experiment_metadata = {}
 
     return ScanMetadata(
         path=Path(scan.source_path),
@@ -87,6 +92,7 @@ def metadata_from_scan(scan) -> ScanMetadata:
         comment=comment,
         acquisition_datetime=acq_dt,
         raw_header=hdr,
+        experiment_metadata=experiment_metadata,
     )
 
 
@@ -96,6 +102,7 @@ def metadata_from_createc_dat_report(report) -> ScanMetadata:
     hdr = dict(report.header)
     bias, setpoint, comment, acq_dt = _extract_createc_fields(hdr)
     plane_names, units = _createc_report_plane_metadata(report)
+    experiment_metadata = createc_dat_experiment_metadata(hdr)
 
     lx_a = _f(hdr.get("Length x[A]", "0"), 0.0)
     ly_a = _f(hdr.get("Length y[A]", "0"), 0.0)
@@ -115,6 +122,7 @@ def metadata_from_createc_dat_report(report) -> ScanMetadata:
         comment=comment,
         acquisition_datetime=acq_dt,
         raw_header=hdr,
+        experiment_metadata=experiment_metadata,
     )
 
 

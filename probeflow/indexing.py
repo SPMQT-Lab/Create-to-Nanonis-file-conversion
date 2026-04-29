@@ -165,6 +165,8 @@ def _item_from_scan(
 ) -> ProbeFlowItem:
     from probeflow.metadata import read_scan_metadata
     meta = read_scan_metadata(path)
+    extra = dict(meta.raw_header)
+    extra["experiment_metadata"] = dict(meta.experiment_metadata)
     return ProbeFlowItem(
         path=path,
         display_name=meta.display_name or path.stem,
@@ -180,7 +182,7 @@ def _item_from_scan(
         acquisition_datetime=meta.acquisition_datetime,
         mtime_ns=mtime_ns,
         size_bytes=size_bytes,
-        metadata=dict(meta.raw_header),
+        metadata=extra,
     )
 
 
@@ -195,6 +197,11 @@ def _item_from_spec(
     n_pts = meta.metadata.get("n_points")
     extra: dict[str, Any] = {
         "sweep_type": meta.metadata.get("sweep_type"),
+        "measurement_family": meta.metadata.get("measurement_family"),
+        "feedback_mode": meta.metadata.get("feedback_mode"),
+        "derivative_label": meta.metadata.get("derivative_label"),
+        "measurement_confidence": meta.metadata.get("measurement_confidence"),
+        "measurement_evidence": meta.metadata.get("measurement_evidence"),
         "n_points": n_pts,
         "position_m": meta.position,
         "spec_freq_hz": _f(meta.metadata.get("spec_freq_hz")),

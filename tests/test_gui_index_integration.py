@@ -1195,6 +1195,25 @@ class TestScanItemsToSxm:
 
         assert "I: ?" in _card_meta_str(entry)
 
+    def test_afm_experiment_label_reaches_scan_card_metadata(self):
+        item = _make_item(
+            "afm.dat",
+            item_type="scan",
+            source_format="createc_dat",
+            shape=(4, 4),
+            metadata={
+                "experiment_metadata": {
+                    "acquisition_mode": "afm",
+                    "topography_role": "afm_topography",
+                }
+            },
+        )
+
+        entry = _scan_items_to_sxm([item])[0]
+
+        assert entry.acquisition_label == "AFM df topography"
+        assert "AFM df topography" in _card_meta_str(entry)
+
     def test_scan_range_converted_to_nm(self):
         item = _make_item("a.sxm", item_type="scan", source_format="nanonis_sxm",
                           shape=(4, 4), scan_range=(10e-9, 10e-9))
@@ -1241,6 +1260,22 @@ class TestSpecItemsToVert:
                           metadata={"sweep_type": "bias_sweep", "n_points": 1000})
         result = _spec_items_to_vert([item])
         assert result[0].sweep_type == "bias_sweep"
+
+    def test_measurement_label_populated(self):
+        item = _make_item(
+            "s.VERT",
+            item_type="spectrum",
+            source_format="createc_vert",
+            metadata={
+                "sweep_type": "bias_sweep",
+                "n_points": 1000,
+                "measurement_family": "iz",
+                "derivative_label": "dI/dz",
+            },
+        )
+        result = _spec_items_to_vert([item])
+        assert result[0].measurement_family == "iz"
+        assert result[0].measurement_label == "I(z) / dI/dz"
 
     def test_n_points_populated(self):
         item = _make_item("s.VERT", item_type="spectrum", source_format="createc_vert",

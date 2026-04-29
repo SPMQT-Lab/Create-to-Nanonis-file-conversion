@@ -114,7 +114,7 @@ def read_createc_dat_report(
         )
 
     payload_float_count = len(payload) // 4
-    num_chan = _detect_channel_count(payload_float_count, Ny, Nx)
+    num_chan = _detect_channel_count(payload_float_count, Ny, Nx, header)
     needed = num_chan * Ny * Nx
     ignored_tail = payload_float_count - needed
     if ignored_tail:
@@ -155,7 +155,7 @@ def read_createc_dat_report(
         "current_a_per_dac": is_,
     }
 
-    channel_info = _channel_info(num_chan, zs, is_)
+    channel_info = _channel_info(num_chan, zs, is_, header)
 
     return CreatecDatDecodeReport(
         path=path,
@@ -197,18 +197,28 @@ def scan_range_m_from_header(hdr: dict[str, str]) -> tuple[float, float]:
     return (lx_a * 1e-10, ly_a * 1e-10)
 
 
-def _detect_channel_count(payload_float_count: int, Ny: int, Nx: int) -> int:
+def _detect_channel_count(
+    payload_float_count: int,
+    Ny: int,
+    Nx: int,
+    hdr: dict[str, str] | None = None,
+) -> int:
     """Detect channel count from payload size.
 
-    ProbeFlow historically tries 4 channels first, then 2.  Keep that order
-    because Createc files often include decompressed tail floats that are not
-    image channels and can otherwise look like extra planes.  Exact non-STM
-    channel counts are still accepted when there is no tail ambiguity.
+    Createc usually records the stored image-plane count in ``Channels``.
+    Trust it when the payload contains that many complete planes; otherwise
+    keep the legacy 4/2 fallback for older or inconsistent headers.
     """
 
     pixels = Ny * Nx
     if pixels <= 0:
         raise ValueError(f"Invalid image dimensions Ny={Ny}, Nx={Nx}")
+
+    header_channels = _i(_header_value(hdr or {}, "Channels"), None)
+    if header_channels is not None and header_channels > 0:
+        needed = header_channels * pixels
+        if payload_float_count >= needed:
+            return header_channels
 
     exact, tail = divmod(payload_float_count, pixels)
     if tail == 0 and exact > 0 and exact not in (2, 4):
@@ -260,8 +270,33 @@ def _channel_info(
     num_chan: int,
     z_scale: float,
     current_scale: float,
+    hdr: dict[str, str] | None = None,
 ) -> tuple[CreatecChannelInfo, ...]:
     """Return best-known Createc channel metadata in native channel order."""
+
+    selected = _selected_scan_channels(hdr or {}, num_chan)
+    if selected is not None:
+        infos: list[CreatecChannelInfo] = []
+        half = len(selected)
+        for native_index in range(num_chan):
+            signal = selected[native_index % half]
+            direction = "forward" if native_index < half else "backward"
+            base_name, unit, scale, semantic = _selected_signal_metadata(
+                signal,
+                z_scale,
+                current_scale,
+            )
+            infos.append(
+                CreatecChannelInfo(
+                    native_index=native_index,
+                    name=f"{base_name} {direction}",
+                    unit=unit,
+                    direction=direction,
+                    scale_factor=float(scale),
+                    semantic=semantic,
+                )
+            )
+        return tuple(infos)
 
     # Future Createc AFM support should replace these positional fallbacks with
     # metadata derived from real AFM .dat headers.  The intended shape is:
@@ -303,3 +338,40 @@ def _channel_info(
             )
         )
     return tuple(infos)
+
+
+def _selected_scan_channels(
+    hdr: dict[str, str],
+    num_chan: int,
+) -> list[int] | None:
+    """Return selected Createc channel bits when they match stored planes."""
+
+    select = _i(_header_value(hdr, "Channelselectval"), None)
+    if select is None or select <= 0 or num_chan % 2:
+        return None
+    bits = [bit for bit in range(32) if select & (1 << bit)]
+    if len(bits) * 2 != num_chan:
+        return None
+    return bits
+
+
+def _selected_signal_metadata(
+    bit: int,
+    z_scale: float,
+    current_scale: float,
+) -> tuple[str, str, float, str]:
+    if bit == 0:
+        return "Z", "m", z_scale, "z"
+    if bit == 1:
+        return "Current", "A", current_scale, "current"
+    return f"Aux{max(0, bit - 1)}", "DAC", 1.0, "unknown"
+
+
+def _header_value(hdr: dict[str, str], key: str):
+    """Return an exact Createc header value, ignoring case and whitespace."""
+
+    target = key.lower()
+    for k, value in hdr.items():
+        if str(k).strip().lower() == target:
+            return value
+    return None

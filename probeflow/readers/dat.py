@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
+from probeflow.createc_interpretation import createc_dat_experiment_metadata
 from probeflow.readers.createc_dat import (
     read_createc_dat_report,
     scale_channels_for_scan,
@@ -83,6 +84,7 @@ def read_dat(path) -> Scan:
         scan_range_m=scan_range_m_from_header(hdr),
         source_path=path,
         source_format="dat",
+        experiment_metadata=createc_dat_experiment_metadata(hdr),
     )
 
 

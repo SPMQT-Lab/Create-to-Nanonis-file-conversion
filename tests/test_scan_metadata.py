@@ -14,6 +14,7 @@ from probeflow.scan import load_scan
 TESTDATA = Path(__file__).resolve().parents[1] / "anonymised_testdata"
 _CREATEC_STEP    = TESTDATA / "createc_scan_step_20nm.dat"
 _CREATEC_TERRACE = TESTDATA / "createc_scan_terrace_109nm.dat"
+_CREATEC_OVERVIEW = TESTDATA / "createc_scan_overview_240nm_pos.dat"
 _NANONIS_SXM     = TESTDATA / "sxm_moire_10nm.sxm"
 _CREATEC_VERT    = TESTDATA / "createc_ivt_telegraph_300mv_a.VERT"
 
@@ -65,6 +66,17 @@ class TestCreatecMetadataMatchesScan:
         scan = load_scan(path)
         meta = read_scan_metadata(path)
         assert meta.units == tuple(scan.plane_units)
+
+    @pytest.mark.parametrize("path", [_CREATEC_STEP, _CREATEC_TERRACE])
+    def test_experiment_metadata_matches_scan(self, path):
+        scan = load_scan(path)
+        meta = read_scan_metadata(path)
+        assert meta.experiment_metadata == scan.experiment_metadata
+
+    def test_modern_stm_fixture_infers_current_feedback(self):
+        meta = read_scan_metadata(_CREATEC_OVERVIEW)
+        assert meta.experiment_metadata["acquisition_mode"] == "stm"
+        assert meta.experiment_metadata["feedback_mode"] == "current"
 
 
 # ── Test B: Createc metadata width agrees with Num.X ─────────────────────────

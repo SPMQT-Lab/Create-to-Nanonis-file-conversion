@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -497,6 +499,7 @@ def _createc_vert_text(
     n_rows: int,
     channel_code: int,
     marker: int | None = None,
+    extra_header: str = "",
     rows: list[list[float]],
 ) -> str:
     """Build a minimal synthetic Createc VERT fixture."""
@@ -510,6 +513,7 @@ def _createc_vert_text(
         "SpecFreq=1000\r\n"
         "Vpoint0.t=0\r\nVpoint0.V=-50.0\r\n"
         "Vpoint1.t=10\r\nVpoint1.V=-60.0\r\n"
+        f"{extra_header}"
     )
     params = f"    {n_rows}    0    0    {channel_code}"
     if marker is not None:
@@ -678,3 +682,94 @@ class TestChannelMetadata:
         assert meta.units == tuple(spec.y_units[ch] for ch in spec.channel_order)
         assert meta.metadata["n_points"] == spec.metadata["n_points"]
         assert meta.metadata["source"]["sha256"] == spec.metadata["source"]["sha256"]
+
+
+class TestMeasurementInterpretation:
+    def test_bias_sweep_defaults_to_sts(self, bias_sweep_spec):
+        assert bias_sweep_spec.metadata["sweep_type"] == "bias_sweep"
+        assert bias_sweep_spec.metadata["measurement_family"] == "sts"
+        assert bias_sweep_spec.metadata["derivative_label"] is None
+
+    def test_time_trace_defaults_to_sts(self, time_trace_spec):
+        assert time_trace_spec.metadata["sweep_type"] == "time_trace"
+        assert time_trace_spec.metadata["measurement_family"] == "sts"
+
+    def test_feedback_lockin_vert_infers_iz_without_changing_x_axis(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "iz_like.VERT",
+            _createc_vert_text(
+                version="ParVERT32",
+                n_rows=2,
+                channel_code=0b11,
+                marker=3,
+                extra_header=(
+                    "FBOff=0\r\n"
+                    "VertFBMode=1\r\n"
+                    "Zpoint0.t=0\r\nZpoint0.z=0\r\n"
+                    "Zpoint1.t=0\r\nZpoint1.z=0\r\n"
+                ),
+                rows=[
+                    [0, 2500.0, 0.0, 0.0, 5000.0, 1.25],
+                    [1, 9000.0, 0.0, 0.0, 6000.0, 1.50],
+                ],
+            ),
+        )
+
+        spec = read_spec_file(f)
+        meta = read_spec_metadata(f)
+
+        assert spec.metadata["sweep_type"] == "bias_sweep"
+        assert spec.x_unit == "V"
+        assert spec.metadata["measurement_family"] == "iz"
+        assert spec.metadata["derivative_label"] == "dI/dz"
+        assert meta.metadata["measurement_family"] == "iz"
+
+    def test_measurement_mode_override_takes_precedence(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "override.VERT",
+            _createc_vert_text(
+                n_rows=2,
+                channel_code=1,
+                rows=[
+                    [0, -50.0, 0.0, -1000.0],
+                    [1, -60.0, 0.0, -2000.0],
+                ],
+            ),
+        )
+
+        sts = read_spec_file(f, measurement_mode="sts")
+        iz = read_spec_metadata(f, measurement_mode="iz")
+
+        assert sts.metadata["measurement_family"] == "sts"
+        assert sts.metadata["measurement_confidence"] == "override"
+        assert iz.metadata["measurement_family"] == "iz"
+        assert iz.metadata["derivative_label"] == "dI/dz"
+
+    def test_invalid_measurement_mode_raises(self, tmp_path):
+        f = _write_createc_vert(
+            tmp_path,
+            "invalid_mode.VERT",
+            _createc_vert_text(
+                n_rows=1,
+                channel_code=1,
+                rows=[[0, -50.0, 0.0, -1000.0]],
+            ),
+        )
+
+        with pytest.raises(ValueError, match="measurement_mode"):
+            read_spec_file(f, measurement_mode="not-a-mode")
+
+    def test_spec_info_json_includes_measurement_metadata(self, capsys):
+        from probeflow.cli import _cmd_spec_info
+
+        rc = _cmd_spec_info(
+            SimpleNamespace(input=VERT_BIAS_SWEEP, json=True, verbose=False)
+        )
+        out = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert out["measurement_family"] == "sts"
+        assert "feedback_mode" in out
+        assert "measurement_evidence" in out

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from probeflow.dat_sxm import convert_dat_to_sxm
+from probeflow.createc_interpretation import createc_dat_experiment_metadata
 from probeflow.metadata import read_scan_metadata
 from probeflow.readers.createc_dat import (
     read_createc_dat_report,
@@ -113,6 +114,49 @@ def test_exact_non_stm_channel_count_and_raw_fallback(tmp_path):
     assert report.channel_info[-1].unit == "DAC"
 
 
+def test_header_declared_channel_count_wins_when_payload_fits(tmp_path):
+    dat = tmp_path / "ten_channels.dat"
+    header = (
+        b"[Paramco32]\n"
+        b"Num.X=2\n"
+        b"Num.Y=2\n"
+        b"Channels=10\n"
+        b"Channelselectval=899\n"
+    )
+    payload = np.arange(1, 44, dtype="<f4").tobytes()
+    dat.write_bytes(header + b"DATA" + zlib.compress(payload))
+
+    report = read_createc_dat_report(dat)
+
+    assert report.detected_channel_count == 10
+    assert report.ignored_tail_float_count == 3
+    assert report.raw_channels_dac is not None
+    assert report.raw_channels_dac.shape == (10, 2, 1)
+    assert [info.name for info in report.channel_info] == [
+        "Z forward",
+        "Current forward",
+        "Aux6 forward",
+        "Aux7 forward",
+        "Aux8 forward",
+        "Z backward",
+        "Current backward",
+        "Aux6 backward",
+        "Aux7 backward",
+        "Aux8 backward",
+    ]
+
+
+def test_implausible_header_channel_count_falls_back_to_payload(tmp_path):
+    dat = tmp_path / "bad_count.dat"
+    header = b"[Paramco32]\nNum.X=2\nNum.Y=2\nChannels=10\n"
+    payload = np.arange(1, 17, dtype="<f4").tobytes()
+    dat.write_bytes(header + b"DATA" + zlib.compress(payload))
+
+    report = read_createc_dat_report(dat, include_raw=False)
+
+    assert report.detected_channel_count == 4
+
+
 def test_metadata_uses_createc_report_without_constructing_scan(
     first_sample_dat, monkeypatch
 ):
@@ -133,3 +177,41 @@ def test_missing_data_marker_raises_createc_error(tmp_path):
 
     with pytest.raises(ValueError, match="missing DATA marker"):
         read_createc_dat_report(bad)
+
+
+def test_createc_qplus_header_infers_afm_topography():
+    meta = createc_dat_experiment_metadata(
+        {
+            "PLLOn": "1",
+            "MEMO_STMAFM": "bias cable removed and grounded with qPlus sensor",
+            "FBChannel": "4",
+        }
+    )
+
+    assert meta["acquisition_mode"] == "afm"
+    assert meta["feedback_mode"] == "constant_frequency_shift"
+    assert meta["topography_role"] == "afm_topography"
+    assert meta["feedback_channel"] == 4
+    assert meta["confidence"] == "high"
+
+
+def test_createc_stm_header_infers_current_feedback():
+    meta = createc_dat_experiment_metadata(
+        {
+            "PLLOn": "0",
+            "MEMO_STMAFM": "",
+            "FBChannel": "0",
+        }
+    )
+
+    assert meta["acquisition_mode"] == "stm"
+    assert meta["feedback_mode"] == "current"
+    assert meta["topography_role"] == "stm_topography"
+
+
+def test_createc_ambiguous_header_stays_unknown():
+    meta = createc_dat_experiment_metadata({"FBChannel": "0"})
+
+    assert meta["acquisition_mode"] == "unknown"
+    assert meta["feedback_mode"] == "unknown"
+    assert meta["confidence"] == "low"

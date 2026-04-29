@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from probeflow.createc_interpretation import scan_mode_label, spec_measurement_label
 
 # ── Data model ────────────────────────────────────────────────────────────────
 PLANE_NAMES = ["Z fwd", "Z bwd", "I fwd", "I bwd"]
@@ -20,14 +22,24 @@ class SxmFile:
     current_pa:    Optional[float] = None
     scan_nm:       Optional[float] = None
     source_format: str            = "sxm"
+    acquisition_label: Optional[str] = None
+    experiment_metadata: dict     = field(default_factory=dict)
 
     @classmethod
     def from_index_item(cls, item) -> "SxmFile":
         """Build the legacy GUI scan entry from a package-level ProbeFlowItem."""
         fmt = {"createc_dat": "dat", "nanonis_sxm": "sxm"}.get(
             item.source_format, item.source_format)
+        experiment = dict(item.metadata.get("experiment_metadata") or {})
+        label = scan_mode_label(experiment)
         if item.load_error or item.shape is None:
-            return cls(path=item.path, stem=item.path.stem, source_format=fmt)
+            return cls(
+                path=item.path,
+                stem=item.path.stem,
+                source_format=fmt,
+                acquisition_label=label,
+                experiment_metadata=experiment,
+            )
         Ny, Nx = item.shape
         return cls(
             path=item.path,
@@ -38,6 +50,8 @@ class SxmFile:
             current_pa=item.setpoint * 1e12 if item.setpoint is not None else None,
             scan_nm=item.scan_range[0] * 1e9 if item.scan_range else None,
             source_format=fmt,
+            acquisition_label=label,
+            experiment_metadata=experiment,
         )
 
 
@@ -49,12 +63,18 @@ class VertFile:
     n_points:     int            = 0
     bias_mv:      Optional[float] = None
     spec_freq_hz: Optional[float] = None
+    measurement_family: str       = "unknown"
+    measurement_label: Optional[str] = None
 
     @classmethod
     def from_index_item(cls, item) -> "VertFile":
         """Build the legacy GUI spectroscopy entry from a ProbeFlowItem."""
         if item.load_error:
             return cls(path=item.path, stem=item.path.stem)
+        measurement = {
+            "measurement_family": item.metadata.get("measurement_family"),
+            "derivative_label": item.metadata.get("derivative_label"),
+        }
         return cls(
             path=item.path,
             stem=item.path.stem,
@@ -62,6 +82,8 @@ class VertFile:
             n_points=int(item.metadata.get("n_points") or 0),
             bias_mv=item.bias * 1000 if item.bias is not None else None,
             spec_freq_hz=item.metadata.get("spec_freq_hz"),
+            measurement_family=str(item.metadata.get("measurement_family") or "unknown"),
+            measurement_label=spec_measurement_label(measurement),
         )
 
 
@@ -79,7 +101,7 @@ def _card_meta_str(entry: SxmFile) -> str:
     v_str = f"V: {entry.bias_mv:.0f} mV"    if entry.bias_mv    is not None else "V: ?"
     i_str = f"I: {entry.current_pa:.0f} pA" if entry.current_pa is not None else "I: ?"
     line2 = f"{v_str}  |  {i_str}"
-    return "\n".join(filter(None, [line1, line2]))
+    return "\n".join(filter(None, [line1, entry.acquisition_label, line2]))
 
 
 def _scan_items_to_sxm(items) -> list[SxmFile]:

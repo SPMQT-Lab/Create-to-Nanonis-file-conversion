@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import numpy as np
 
@@ -61,6 +61,7 @@ class Scan:
     source_path: Path
     source_format: str
     processing_history: List[dict] = field(default_factory=list)
+    experiment_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_planes(self) -> int:
