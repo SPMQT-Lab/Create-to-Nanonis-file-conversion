@@ -185,6 +185,22 @@ class TestScanMetadataContract:
         assert meta_dat.source_format == "createc_dat"
         assert meta_sxm.source_format == "nanonis_sxm"
 
+    def test_sxm_metadata_does_not_load_full_scan(self, monkeypatch):
+        def fail_load_scan(_path):
+            raise AssertionError("SXM metadata should not construct a full Scan")
+
+        def fail_read_planes(*_args, **_kwargs):
+            raise AssertionError("SXM metadata should not decode image planes")
+
+        monkeypatch.setattr("probeflow.scan.load_scan", fail_load_scan)
+        monkeypatch.setattr("probeflow.readers.sxm.read_all_sxm_planes", fail_read_planes)
+
+        meta = read_scan_metadata(_NANONIS_SXM)
+
+        assert meta.source_format == "nanonis_sxm"
+        assert meta.shape is not None
+        assert meta.plane_names
+
 
 class TestCreatecSetpointExtraction:
     def test_current_a_preferred(self):

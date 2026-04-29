@@ -233,6 +233,37 @@ def _detect_channel_count(
     )
 
 
+def has_legacy_stm_two_channel_layout(report: CreatecDatDecodeReport) -> bool:
+    """Return True for legacy [Z forward, Current forward] Createc DAT files."""
+
+    if report.detected_channel_count != 2 or len(report.channel_info) != 2:
+        return False
+    first, second = report.channel_info
+    return (
+        first.semantic == "z"
+        and first.direction == "forward"
+        and second.semantic == "current"
+        and second.direction == "forward"
+    )
+
+
+def has_canonical_stm_four_channel_layout(report: CreatecDatDecodeReport) -> bool:
+    """Return True for native [Z fwd, I fwd, Z bwd, I bwd] DAT files."""
+
+    if report.detected_channel_count != 4 or len(report.channel_info) != 4:
+        return False
+    expected = (
+        ("z", "forward"),
+        ("current", "forward"),
+        ("z", "backward"),
+        ("current", "backward"),
+    )
+    return all(
+        info.semantic == semantic and info.direction == direction
+        for info, (semantic, direction) in zip(report.channel_info, expected)
+    )
+
+
 def _first_column_diagnostics(stack: np.ndarray) -> list[dict[str, float | int | None]]:
     """Summarise the first stored column before it is removed."""
 

@@ -7,7 +7,13 @@ from pathlib import Path
 import numpy as np
 
 from probeflow.scan_model import Scan
-from probeflow.sxm_io import read_all_sxm_planes, sxm_plane_metadata, sxm_scan_range
+from probeflow.sxm_io import (
+    parse_sxm_header,
+    read_all_sxm_planes,
+    sxm_payload_plane_count,
+    sxm_plane_metadata,
+    sxm_scan_range,
+)
 
 
 def read_sxm(path) -> Scan:
@@ -35,5 +41,11 @@ def read_sxm(path) -> Scan:
 
 def read_sxm_metadata(path):
     """Return :class:`~probeflow.metadata.ScanMetadata` for a Nanonis ``.sxm``."""
-    from probeflow.metadata import metadata_from_scan
-    return metadata_from_scan(read_sxm(path))
+    from probeflow.metadata import metadata_from_sxm_header
+
+    path = Path(path)
+    hdr = parse_sxm_header(path)
+    n_planes = sxm_payload_plane_count(path, hdr)
+    if n_planes <= 0:
+        raise ValueError(f"{path}: no data planes could be read")
+    return metadata_from_sxm_header(path, hdr, n_planes)

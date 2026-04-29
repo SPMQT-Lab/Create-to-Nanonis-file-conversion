@@ -12,7 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .common import _f, setup_logging
-from .readers.createc_dat import read_createc_dat_report
+from .readers.createc_dat import (
+    has_canonical_stm_four_channel_layout,
+    has_legacy_stm_two_channel_layout,
+    read_createc_dat_report,
+)
 from .scan import load_scan
 from .writers.sxm import write_sxm
 
@@ -333,6 +337,14 @@ def process_dat(
     raw_stack = report.raw_channels_dac
     if raw_stack is None:
         raise ValueError(f"{dat.name}: internal decode report has no image data")
+    if not (
+        has_canonical_stm_four_channel_layout(report)
+        or has_legacy_stm_two_channel_layout(report)
+    ):
+        raise ValueError(
+            f"{dat.name}: .dat→.sxm reconstruction supports only canonical "
+            "STM Z/current layouts"
+        )
     stack = np.array(raw_stack, copy=True)
     num_chan = report.detected_channel_count
     log.info("%s: %d channels detected", dat.name, num_chan)

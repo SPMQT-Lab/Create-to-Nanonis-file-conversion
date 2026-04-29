@@ -277,6 +277,25 @@ def read_all_sxm_planes(
     return hdr, planes
 
 
+def sxm_payload_plane_count(
+    sxm_path: Path,
+    hdr: Optional[dict] = None,
+    cushion_dir: Optional[Path] = None,
+) -> int:
+    """Return the number of complete image planes in an SXM payload."""
+
+    sxm_path = Path(sxm_path)
+    if hdr is None:
+        hdr = parse_sxm_header(sxm_path)
+    Nx, Ny = sxm_dims(hdr)
+    raw = sxm_path.read_bytes()
+    offset = _data_offset_in_file(raw, cushion_dir)
+    plane_bytes = Ny * Nx * 4
+    if plane_bytes <= 0 or len(raw) <= offset:
+        return 0
+    return (len(raw) - offset) // plane_bytes
+
+
 # ── Writing a modified .sxm ──────────────────────────────────────────────────
 
 def _patch_comment_in_header(header_bytes: bytes, new_comment: str) -> bytes:

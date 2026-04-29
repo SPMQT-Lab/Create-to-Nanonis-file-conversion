@@ -126,11 +126,46 @@ def metadata_from_createc_dat_report(report) -> ScanMetadata:
     )
 
 
+def metadata_from_sxm_header(path, hdr: dict, n_planes: int) -> ScanMetadata:
+    """Build ``ScanMetadata`` from a Nanonis SXM header and payload summary."""
+
+    from probeflow.sxm_io import sxm_dims, sxm_plane_metadata, sxm_scan_range
+
+    path = Path(path)
+    Nx, Ny = sxm_dims(hdr)
+    plane_names, units = sxm_plane_metadata(hdr, n_planes)
+    bias, setpoint, comment, acq_dt = _extract_nanonis_fields(hdr)
+
+    return ScanMetadata(
+        path=path,
+        source_format="nanonis_sxm",
+        item_type="scan",
+        display_name=path.stem,
+        shape=(Ny, Nx),
+        plane_names=tuple(plane_names),
+        units=tuple(units),
+        scan_range=sxm_scan_range(hdr),
+        bias=bias,
+        setpoint=setpoint,
+        comment=comment,
+        acquisition_datetime=acq_dt,
+        raw_header=dict(hdr),
+        experiment_metadata={},
+    )
+
+
 def _createc_report_plane_metadata(report) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return public plane names/units matching ``read_dat`` compatibility."""
 
-    num_chan = report.detected_channel_count
-    if num_chan in (2, 4):
+    from probeflow.readers.createc_dat import (
+        has_canonical_stm_four_channel_layout,
+        has_legacy_stm_two_channel_layout,
+    )
+
+    if (
+        has_canonical_stm_four_channel_layout(report)
+        or has_legacy_stm_two_channel_layout(report)
+    ):
         return (
             ("Z forward", "Z backward", "Current forward", "Current backward"),
             ("m", "m", "A", "A"),
@@ -206,12 +241,15 @@ def read_scan_metadata(path) -> ScanMetadata:
     path so callers do not pay the cost of constructing a full ``Scan``.
     """
     from probeflow.loaders import identify_scan_file
-    from probeflow.scan import load_scan
 
     sig = identify_scan_file(path)
     if sig.source_format == "dat":
         from probeflow.readers.dat import read_dat_metadata
 
         return read_dat_metadata(sig.path)
+    if sig.source_format == "sxm":
+        from probeflow.readers.sxm import read_sxm_metadata
 
-    return metadata_from_scan(load_scan(sig.path))
+        return read_sxm_metadata(sig.path)
+
+    raise ValueError(f"Unsupported scan source format: {sig.source_format!r}")

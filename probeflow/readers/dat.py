@@ -7,12 +7,12 @@ so processing pipelines can operate on them the same way they operate on a
 ``.sxm``-sourced Scan.
 
 Createc channel layout:
-  * 4-channel files contain [FT, FC, BT, BC] = [Z fwd, I fwd, Z bwd, I bwd].
-  * 2-channel files contain only [FT, FC]; the backward planes are
-    synthesised as copies of the forward planes and flagged in
-    ``scan.plane_synthetic``.
-  * Other decoded channel counts are returned in native order with the
-    best-known names/units from the decode report.
+  * Canonical STM 4-plane files are reordered from native
+    [Z fwd, I fwd, Z bwd, I bwd] to public [Z fwd, Z bwd, I fwd, I bwd].
+  * Legacy STM 2-plane files with only [Z fwd, I fwd] synthesise backward
+    planes and flag them in ``scan.plane_synthetic``.
+  * Selected-channel and auxiliary layouts are returned in native order with
+    the best-known names/units from the decode report.
 
 Orientation:
   * Createc stores backward scan rows in left-to-right display order already
@@ -34,6 +34,8 @@ import numpy as np
 
 from probeflow.createc_interpretation import createc_dat_experiment_metadata
 from probeflow.readers.createc_dat import (
+    has_canonical_stm_four_channel_layout,
+    has_legacy_stm_two_channel_layout,
     read_createc_dat_report,
     scale_channels_for_scan,
     scan_range_m_from_header,
@@ -50,13 +52,15 @@ def read_dat(path) -> Scan:
     num_chan = report.detected_channel_count
 
     # Createc native STM → canonical [Z fwd, Z bwd, I fwd, I bwd] ordering.
-    if num_chan == 4:
+    # Non-STM selected-channel layouts stay in native report order so their
+    # labels/units do not inherit STM positional assumptions.
+    if has_canonical_stm_four_channel_layout(report):
         FT, FC, BT, BC = scaled[0], scaled[1], scaled[2], scaled[3]
         synthetic = [False, False, False, False]
         plane_names = ["Z forward", "Z backward", "Current forward", "Current backward"]
         plane_units = ["m", "m", "A", "A"]
         planes = [FT, BT, FC, BC]
-    elif num_chan == 2:
+    elif has_legacy_stm_two_channel_layout(report):
         FT, FC = scaled[0], scaled[1]
         BT = FT.copy()
         BC = FC.copy()

@@ -33,10 +33,11 @@ class Scan:
     Attributes
     ----------
     planes
-        List of 2-D float64 arrays in SI units. By convention plane 0 is
-        Z forward, plane 1 is Z backward, plane 2 is Current forward, plane 3
-        is Current backward. Each array is oriented for display: origin at
-        the top-left and scan direction left-to-right.
+        List of 2-D float64 arrays. Canonical STM scans use SI units and the
+        public order Z forward, Z backward, Current forward, Current backward.
+        Selected-channel or auxiliary layouts preserve native channel order
+        with units recorded in ``plane_units``. Each array is oriented for
+        display: origin at the top-left and scan direction left-to-right.
     plane_names, plane_units
         Parallel lists describing each plane.
     plane_synthetic

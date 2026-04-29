@@ -150,6 +150,61 @@ def test_header_declared_channel_count_wins_when_payload_fits(tmp_path):
     ]
 
 
+def test_selected_two_plane_dat_stays_native_without_synthetic_current(tmp_path):
+    dat = tmp_path / "two_z_planes.dat"
+    header = (
+        b"[Paramco32]\n"
+        b"Num.X=3\n"
+        b"Num.Y=2\n"
+        b"Channels=2\n"
+        b"Channelselectval=1\n"
+        b"Length x[A]=10\n"
+        b"Length y[A]=10\n"
+    )
+    payload = np.arange(12, dtype="<f4").tobytes()
+    dat.write_bytes(header + b"DATA" + zlib.compress(payload))
+
+    report = read_createc_dat_report(dat)
+    scan = load_scan(dat)
+    meta = read_scan_metadata(dat)
+
+    assert [info.name for info in report.channel_info] == [
+        "Z forward",
+        "Z backward",
+    ]
+    assert scan.plane_names == ["Z forward", "Z backward"]
+    assert scan.plane_units == ["m", "m"]
+    assert scan.plane_synthetic == [False, False]
+    assert meta.plane_names == tuple(scan.plane_names)
+    assert meta.units == tuple(scan.plane_units)
+
+
+def test_selected_four_plane_non_stm_dat_stays_native(tmp_path):
+    dat = tmp_path / "z_aux_planes.dat"
+    header = (
+        b"[Paramco32]\n"
+        b"Num.X=3\n"
+        b"Num.Y=2\n"
+        b"Channels=4\n"
+        b"Channelselectval=129\n"
+        b"Length x[A]=10\n"
+        b"Length y[A]=10\n"
+    )
+    payload = np.arange(24, dtype="<f4").tobytes()
+    dat.write_bytes(header + b"DATA" + zlib.compress(payload))
+
+    scan = load_scan(dat)
+
+    assert scan.plane_names == [
+        "Z forward",
+        "Aux6 forward",
+        "Z backward",
+        "Aux6 backward",
+    ]
+    assert scan.plane_units == ["m", "DAC", "m", "DAC"]
+    assert scan.plane_synthetic == [False, False, False, False]
+
+
 def test_implausible_header_channel_count_falls_back_to_payload(tmp_path):
     dat = tmp_path / "bad_count.dat"
     header = b"[Paramco32]\nNum.X=2\nNum.Y=2\nChannels=10\n"
@@ -180,6 +235,11 @@ def test_anonymized_qplus_fixture_decodes_all_10_channels():
         "Aux7 backward",
         "Aux8 backward",
     ]
+
+
+def test_dat_to_sxm_rejects_noncanonical_multichannel_dat(tmp_path, cushion_dir):
+    with pytest.raises(ValueError, match="canonical STM"):
+        convert_dat_to_sxm(QPLUS_10CH_DAT, tmp_path, cushion_dir)
 
 
 def test_metadata_uses_createc_report_without_constructing_scan(

@@ -131,16 +131,20 @@ def read_nanonis_spec(path: Union[str, Path]) -> SpecData:
     y_units: dict[str, str] = {}
     channel_info: dict[str, SpecChannel] = {}
     channel_order: list[str] = []
+    seen_names: set[str] = set()
     for i, (raw, name, unit) in enumerate(columns):
-        # Column names may collide in rare Nanonis exports; keep the first and
-        # log a warning rather than silently overwriting data.
-        if name in channels:
-            log.warning("%s: duplicate channel name %r — keeping first", path.name, name)
-            continue
-        channels[name] = arr[:, i]
-        y_units[name] = unit
-        channel_info[name] = _spec_channel_from_column(raw, name, unit)
-        channel_order.append(name)
+        key = _unique_channel_key(name, seen_names)
+        if key != name:
+            log.warning(
+                "%s: duplicate channel name %r — using key %r",
+                path.name,
+                name,
+                key,
+            )
+        channels[key] = arr[:, i]
+        y_units[key] = unit
+        channel_info[key] = _spec_channel_from_column(raw, key, name, unit)
+        channel_order.append(key)
 
     # Pick X axis: prefer a "Bias calc" column for bias sweeps, else "Bias",
     # else fall back to the first column.
@@ -300,21 +304,38 @@ def _channel_info_from_columns(
     columns: list[tuple[str, str, str]],
 ) -> dict[str, SpecChannel]:
     channel_info: dict[str, SpecChannel] = {}
+    seen_names: set[str] = set()
     for raw, name, unit in columns:
-        if name in channel_info:
-            continue
-        channel_info[name] = _spec_channel_from_column(raw, name, unit)
+        key = _unique_channel_key(name, seen_names)
+        channel_info[key] = _spec_channel_from_column(raw, key, name, unit)
     return channel_info
 
 
-def _spec_channel_from_column(raw: str, name: str, unit: str) -> SpecChannel:
+def _unique_channel_key(name: str, seen: set[str]) -> str:
+    if name not in seen:
+        seen.add(name)
+        return name
+    idx = 2
+    while f"{name} {idx}" in seen:
+        idx += 1
+    key = f"{name} {idx}"
+    seen.add(key)
+    return key
+
+
+def _spec_channel_from_column(
+    raw: str,
+    key: str,
+    source_name: str,
+    unit: str,
+) -> SpecChannel:
     return SpecChannel(
-        key=name,
-        source_name=name,
+        key=key,
+        source_name=source_name,
         source_label=raw,
         unit=unit,
-        roles=infer_spec_channel_roles(name),
-        display_label=name,
+        roles=infer_spec_channel_roles(source_name),
+        display_label=key,
     )
 
 
@@ -352,6 +373,7 @@ def _read_nanonis_spec_header_summary(
                 continue
 
             if stripped:
+                _parse_numeric_row_summary(path, line, len(columns))
                 n_points += 1
 
     if not in_data:
@@ -359,6 +381,24 @@ def _read_nanonis_spec_header_summary(
     if not have_column_header:
         raise ValueError(f"{path.name}: no column header after [DATA]")
     return hdr, columns, n_points
+
+
+def _parse_numeric_row_summary(
+    path: Path,
+    line: str,
+    expected_columns: int,
+) -> None:
+    parts = line.rstrip("\r\n").rstrip("\t ").split("\t")
+    if len(parts) != expected_columns:
+        raise ValueError(
+            f"{path.name}: data row has {len(parts)} column(s), "
+            f"expected {expected_columns}"
+        )
+    try:
+        for value in parts:
+            float(value)
+    except ValueError as exc:
+        raise ValueError(f"{path.name}: failed to parse data row - {exc}") from exc
 
 
 def _parse_column_header(col_header: str) -> list[tuple[str, str, str]]:

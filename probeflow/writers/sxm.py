@@ -23,7 +23,7 @@ import numpy as np
 
 from probeflow.common import check_overwrite
 from probeflow.export_provenance import build_scan_export_provenance
-from probeflow.scan_model import Scan
+from probeflow.scan_model import PLANE_CANON_NAMES, PLANE_CANON_UNITS, Scan
 from probeflow.sxm_io import write_sxm_with_planes
 
 
@@ -118,9 +118,11 @@ def _write_from_dat(
         out = np.fliplr(arr) if is_backward else arr
         return np.ascontiguousarray(out, dtype=np.float32)
 
-    if scan.n_planes < 4:
+    if not _is_canonical_dat_sxm_layout(scan):
         raise ValueError(
-            f"Expected 4 planes in dat-sourced Scan, got {scan.n_planes}"
+            "DAT-to-SXM export currently supports only canonical STM "
+            "[Z forward, Z backward, Current forward, Current backward] "
+            f"scans; got {scan.n_planes} plane(s): {scan.plane_names}"
         )
 
     FT = _undo_orient(scan.planes[0], is_backward=False)
@@ -161,4 +163,12 @@ def _write_from_dat(
         tail_bytes=layout["tail_bytes"],
         force_data_offset=layout["data_offset"],
         filler_char=b" ",
+    )
+
+
+def _is_canonical_dat_sxm_layout(scan: Scan) -> bool:
+    return (
+        scan.n_planes == 4
+        and tuple(scan.plane_names) == PLANE_CANON_NAMES
+        and tuple(scan.plane_units) == PLANE_CANON_UNITS
     )

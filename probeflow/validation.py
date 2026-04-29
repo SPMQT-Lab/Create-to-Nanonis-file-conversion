@@ -128,11 +128,11 @@ def _validate_createc(scan: Scan) -> None:
                 f"array height {Ny} != Num.Y header {ny_expected}",
             )
 
-    if len(scan.planes) == 4:
+    if any(scan.plane_synthetic):
         if scan.plane_names != _CREATEC_PLANE_NAMES:
             raise _err(
                 scan,
-                f"4-plane Createc scan has unexpected plane names: "
+                f"synthetic Createc scan has unexpected plane names: "
                 f"{scan.plane_names} (expected {_CREATEC_PLANE_NAMES})",
             )
 

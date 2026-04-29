@@ -14,6 +14,7 @@ from probeflow.sxm_io import (
     read_sxm_plane,
     sxm_data_info,
     sxm_dims,
+    sxm_payload_plane_count,
     sxm_plane_metadata,
     sxm_scan_range,
     write_sxm_with_planes,
@@ -102,6 +103,10 @@ class TestReadPlanes:
         Nx, Ny = sxm_dims(hdr)
         for p in planes:
             assert p.shape == (Ny, Nx)
+
+    def test_payload_plane_count_matches_read_planes(self, sample_sxm):
+        hdr, planes = read_all_sxm_planes(sample_sxm)
+        assert sxm_payload_plane_count(sample_sxm, hdr) == len(planes)
 
     def test_missing_plane_returns_none(self, sample_sxm):
         arr = read_sxm_plane(sample_sxm, plane_idx=99)

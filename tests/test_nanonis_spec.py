@@ -72,6 +72,33 @@ class TestChannels:
         ]
         assert "Bias calc" in sts_spec.metadata["source_channels"]
 
+    def test_duplicate_column_names_are_uniquified(self, tmp_path):
+        f = tmp_path / "duplicate_columns.dat"
+        f.write_text(
+            "Experiment\tBias Spectroscopy\n"
+            "[DATA]\n"
+            "Bias (V)\tSignal (A)\tSignal (A)\n"
+            "0\t1\t2\n"
+            "1\t3\t4\n",
+            encoding="latin-1",
+        )
+
+        spec = read_spec_file(f)
+        meta = read_spec_metadata(f)
+
+        assert spec.channel_order == ["Bias", "Signal", "Signal 2"]
+        np.testing.assert_allclose(spec.channels["Signal"], [1, 3])
+        np.testing.assert_allclose(spec.channels["Signal 2"], [2, 4])
+        assert spec.channel_info["Signal"].source_name == "Signal"
+        assert spec.channel_info["Signal 2"].source_name == "Signal"
+        assert spec.channel_info["Signal 2"].source_label == "Signal (A)"
+        assert meta.channels == tuple(spec.channel_order)
+        assert tuple(ch.source_name for ch in meta.channel_info) == (
+            "Bias",
+            "Signal",
+            "Signal",
+        )
+
 
 class TestXAxis:
     def test_kelvin_x_is_bias_v(self, kelvin_spec):
@@ -164,3 +191,31 @@ class TestDispatcher:
         assert len(metadata_source["sha256"]) == 64
         assert metadata_source["file_size_bytes"] > 0
         assert metadata_source["data_offset"] is not None
+
+    def test_metadata_rejects_non_numeric_rows(self, tmp_path):
+        f = tmp_path / "bad_numeric.dat"
+        f.write_text(
+            "Experiment\tBias Spectroscopy\n"
+            "[DATA]\n"
+            "Bias (V)\tCurrent (A)\n"
+            "0\t1\n"
+            "1\tnope\n",
+            encoding="latin-1",
+        )
+
+        with pytest.raises(ValueError, match="failed to parse data row"):
+            read_spec_metadata(f)
+
+    def test_metadata_rejects_wrong_column_count(self, tmp_path):
+        f = tmp_path / "bad_columns.dat"
+        f.write_text(
+            "Experiment\tBias Spectroscopy\n"
+            "[DATA]\n"
+            "Bias (V)\tCurrent (A)\n"
+            "0\t1\n"
+            "1\t2\t3\n",
+            encoding="latin-1",
+        )
+
+        with pytest.raises(ValueError, match="expected 2"):
+            read_spec_metadata(f)
