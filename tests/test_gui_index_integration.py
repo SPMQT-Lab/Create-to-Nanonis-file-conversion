@@ -236,7 +236,15 @@ class TestViewerRenderSizing:
         from probeflow.scan import load_scan
 
         scan = load_scan(TESTDATA / "sxm_moire_10nm.sxm")
-        img = render_with_processing(
+        img = render_scan_image(
+            arr=scan.planes[0],
+            colormap="gray",
+            clip_low=1.0,
+            clip_high=99.0,
+            processing={"align_rows": "median"},
+            size=None,
+        )
+        compat = render_with_processing(
             scan.planes[0],
             "gray",
             1.0,
@@ -247,6 +255,8 @@ class TestViewerRenderSizing:
 
         assert img is not None
         assert img.size == (160, 160)
+        assert compat is not None
+        assert compat.size == img.size
 
     def test_scan_workers_share_render_helper(self, monkeypatch):
         from PIL import Image
@@ -281,10 +291,155 @@ class TestViewerRenderSizing:
         assert len(calls) == 3
         assert calls[0]["arr"] is FakeScan.planes[1]
         assert calls[0]["size"] == (148, 116)
+        assert calls[1]["arr"] is None
         assert calls[1]["scan_path"] == entry.path
         assert calls[1]["size"] == (124, 98)
+        assert calls[2]["arr"] is None
         assert calls[2]["scan_path"] == entry.path
         assert calls[2]["size"] is None
+
+    def test_viewer_display_range_refresh_preserves_zoom_and_reuses_display_array(self, qapp, monkeypatch):
+        from probeflow.gui import ImageViewerDialog, THEMES
+        import probeflow.gui as gui_mod
+
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+        monkeypatch.setattr(gui_mod, "load_scan", lambda _path: pytest.fail("display refresh reloaded source"))
+
+        class SyncPool:
+            def start(self, loader):
+                loader.run()
+
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan")
+        dlg = ImageViewerDialog(entry, [entry], "gray", THEMES["dark"])
+        dlg._pool = SyncPool()
+        dlg._raw_arr = np.arange(100, dtype=float).reshape(10, 10)
+        dlg._display_arr = dlg._raw_arr
+        dlg._scan_range_m = (10e-9, 10e-9)
+        dlg._scan_plane_names = ["Z forward"]
+        dlg._scan_plane_units = ["m"]
+
+        dlg._refresh_viewer_pixmap(reset_zoom=True)
+        qapp.processEvents()
+        dlg._zoom_lbl.zoom_by(0.5)
+        qapp.processEvents()
+
+        dlg._low_sl.setValue(2)
+        dlg._high_sl.setValue(98)
+        dlg._on_slider_clip()
+        qapp.processEvents()
+
+        assert dlg._zoom_lbl.zoom() == 0.5
+
+        dlg.close()
+        dlg.deleteLater()
+
+    def test_viewer_histogram_manual_range_preserves_zoom(self, qapp, monkeypatch):
+        from probeflow.gui import ImageViewerDialog, THEMES
+        import probeflow.gui as gui_mod
+
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+        monkeypatch.setattr(gui_mod, "load_scan", lambda _path: pytest.fail("hist refresh reloaded source"))
+
+        class SyncPool:
+            def start(self, loader):
+                loader.run()
+
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan")
+        dlg = ImageViewerDialog(entry, [entry], "gray", THEMES["dark"])
+        dlg._pool = SyncPool()
+        dlg._raw_arr = np.arange(100, dtype=float).reshape(10, 10)
+        dlg._display_arr = dlg._raw_arr
+        dlg._scan_range_m = (10e-9, 10e-9)
+        dlg._scan_plane_names = ["Z forward"]
+        dlg._scan_plane_units = ["m"]
+        dlg._update_histogram()
+        dlg._refresh_viewer_pixmap(reset_zoom=True)
+        qapp.processEvents()
+        dlg._zoom_lbl.zoom_by(0.5)
+        qapp.processEvents()
+
+        dlg._dragging = "low"
+        dlg._low_line.set_xdata([10.0, 10.0])
+        dlg._high_line.set_xdata([90.0, 90.0])
+        dlg._on_hist_release(type("Event", (), {})())
+        qapp.processEvents()
+
+        assert dlg._zoom_lbl.zoom() == 0.5
+
+        dlg.close()
+        dlg.deleteLater()
+
+    def test_viewer_navigation_resets_zoom(self, qapp, monkeypatch):
+        from probeflow.gui import ImageViewerDialog, THEMES
+        import probeflow.gui as gui_mod
+
+        class FakeScan:
+            plane_names = ["Z forward"]
+            plane_units = ["m"]
+            n_planes = 1
+            planes = [np.arange(100, dtype=float).reshape(10, 10)]
+            header = {}
+            scan_range_m = (10e-9, 10e-9)
+
+        class SyncPool:
+            def start(self, loader):
+                loader.run()
+
+        load_current = ImageViewerDialog._load_current
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+        monkeypatch.setattr(gui_mod, "load_scan", lambda _path: FakeScan())
+
+        entries = [SxmFile(path=Path("a.sxm"), stem="a"), SxmFile(path=Path("b.sxm"), stem="b")]
+        dlg = ImageViewerDialog(entries[0], entries, "gray", THEMES["dark"])
+        dlg._pool = SyncPool()
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", load_current)
+        load_current(dlg, reset_zoom=True)
+        qapp.processEvents()
+        dlg._zoom_lbl.zoom_by(0.5)
+        qapp.processEvents()
+
+        dlg._go_next()
+        qapp.processEvents()
+
+        assert dlg._zoom_lbl.zoom() == 1.0
+
+        dlg.close()
+        dlg.deleteLater()
+
+    def test_viewer_processing_refresh_applies_processing_once(self, qapp, monkeypatch):
+        from probeflow.gui import ImageViewerDialog, THEMES
+        import probeflow.gui as gui_mod
+
+        calls = []
+
+        def fake_apply(arr, processing):
+            calls.append(processing)
+            return arr + 1
+
+        class SyncPool:
+            def start(self, loader):
+                loader.run()
+
+        monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+        monkeypatch.setattr(gui_mod, "_apply_processing", fake_apply)
+
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan")
+        dlg = ImageViewerDialog(entry, [entry], "gray", THEMES["dark"])
+        dlg._pool = SyncPool()
+        dlg._raw_arr = np.arange(100, dtype=float).reshape(10, 10)
+        dlg._display_arr = dlg._raw_arr
+        dlg._processing = {"align_rows": "median"}
+        dlg._scan_range_m = (10e-9, 10e-9)
+        dlg._scan_plane_names = ["Z forward"]
+        dlg._scan_plane_units = ["m"]
+
+        dlg._refresh_processing_display()
+        qapp.processEvents()
+
+        assert calls == [{"align_rows": "median"}]
+
+        dlg.close()
+        dlg.deleteLater()
 
 
 class TestThumbnailChannelResolution:
@@ -539,6 +694,74 @@ class TestBrowseLayoutCleanup:
         assert panel._meta_widget.isVisible() is False
         assert panel.layout().stretch(panel.layout().indexOf(panel._meta_widget)) == 0
         assert panel.layout().stretch(panel.layout().indexOf(panel._bottom_spacer)) == 1
+
+        panel.close()
+        panel.deleteLater()
+
+    def test_browse_info_show_entry_uses_raw_channel_previews(self, qapp, monkeypatch):
+        panel = BrowseInfoPanel(THEMES["dark"], {})
+        captured = {}
+
+        def fake_load_channels(entry, colormap_key, processing=None):
+            captured["processing"] = processing
+
+        monkeypatch.setattr(panel, "load_channels", fake_load_channels)
+        monkeypatch.setattr(panel, "_load_metadata", lambda _entry: None)
+
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan", Nx=4, Ny=4)
+        panel.show_entry(entry, "gray", {"align_rows": "median"})
+
+        assert captured["processing"] is None
+
+        panel.close()
+        panel.deleteLater()
+
+    def test_browse_info_load_channels_decodes_once_and_renders_raw_planes(self, qapp, monkeypatch):
+        import probeflow.gui as gui_mod
+        from PIL import Image
+
+        render_calls = []
+        load_calls = []
+
+        class SyncPool:
+            def start(self, loader):
+                loader.run()
+
+        class FakeScan:
+            plane_names = ["Z forward", "Current forward", "Aux"]
+            plane_units = ["m", "A", "V"]
+            n_planes = 3
+            planes = [
+                np.zeros((4, 4)),
+                np.ones((4, 4)),
+                np.full((4, 4), 2.0),
+            ]
+            header = {}
+
+        def fake_load_scan(path):
+            load_calls.append(path)
+            return FakeScan()
+
+        def fake_render(**kwargs):
+            render_calls.append(kwargs)
+            return Image.new("RGB", (2, 2))
+
+        monkeypatch.setattr(gui_mod, "load_scan", fake_load_scan)
+        monkeypatch.setattr(gui_mod, "render_scan_image", fake_render)
+
+        panel = BrowseInfoPanel(THEMES["dark"], {})
+        panel._pool = SyncPool()
+        entry = SxmFile(path=Path("scan.sxm"), stem="scan", Nx=4, Ny=4)
+
+        panel.load_channels(entry, "viridis", processing=None)
+
+        assert load_calls == [entry.path]
+        assert all(
+            call["arr"] is plane
+            for call, plane in zip(render_calls, FakeScan.planes)
+        )
+        assert all(call["scan_path"] is None for call in render_calls)
+        assert all(call["processing"] is None for call in render_calls)
 
         panel.close()
         panel.deleteLater()

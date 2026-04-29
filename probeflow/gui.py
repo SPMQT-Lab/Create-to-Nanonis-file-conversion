@@ -461,12 +461,35 @@ def render_scan_image(
         if arr is None:
             return None
         if processing:
-            return render_with_processing(
-                arr, colormap, clip_low, clip_high, processing,
-                size=size, vmin=vmin, vmax=vmax, allow_upscale=allow_upscale)
-        return _render_scan_array(
-            arr, colormap, clip_low, clip_high,
-            size=size, vmin=vmin, vmax=vmax, allow_upscale=allow_upscale)
+            arr = _apply_processing(arr, processing)
+
+        if vmin is None or vmax is None:
+            vmin, vmax = clip_range_from_arr(arr, clip_low, clip_high)
+        if vmin is None:
+            return None
+
+        u8 = _array_to_uint8(arr, vmin=vmin, vmax=vmax)
+        colored = _get_lut(colormap)[u8]
+        grain_thresh = (processing or {}).get("grain_threshold")
+        if grain_thresh is not None:
+            label_map, _, _ = _proc.detect_grains(
+                arr,
+                threshold_pct=float(grain_thresh),
+                above=bool((processing or {}).get("grain_above", True)),
+            )
+            colored = colored.copy()
+            grain_px = label_map > 0
+            colored[grain_px, 0] = np.clip(
+                colored[grain_px, 0].astype(int) // 2 + 128, 0, 255)
+            colored[grain_px, 1] = colored[grain_px, 1] // 3
+            colored[grain_px, 2] = colored[grain_px, 2] // 3
+        img = Image.fromarray(colored, mode="RGB")
+        if size:
+            if allow_upscale:
+                img = _fit_image_to_box(img, size)
+            else:
+                img.thumbnail(size, Image.LANCZOS)
+        return img
     except Exception:
         return None
 
@@ -547,44 +570,17 @@ def render_with_processing(
         grain_threshold  : float | None  — percentile for grain detection
         grain_above      : bool
     """
-    if processing is None:
-        processing = {}
-    try:
-        a = _apply_processing(arr, processing)
-
-        if vmin is None or vmax is None:
-            vmin, vmax = clip_range_from_arr(a, clip_low, clip_high)
-        if vmin is None:
-            return None
-
-        # Grain overlay: colour-code labelled regions on top of the image
-        grain_thresh = processing.get('grain_threshold')
-        u8 = _array_to_uint8(a, vmin=vmin, vmax=vmax)
-        if grain_thresh is not None:
-            label_map, n_grains, _ = _proc.detect_grains(
-                a,
-                threshold_pct=float(grain_thresh),
-                above=bool(processing.get('grain_above', True)),
-            )
-            colored = _get_lut(colormap)[u8].copy()
-            # Tint grain pixels: blend toward red
-            grain_px = label_map > 0
-            colored[grain_px, 0] = np.clip(colored[grain_px, 0].astype(int) // 2 + 128, 0, 255)
-            colored[grain_px, 1] = colored[grain_px, 1] // 3
-            colored[grain_px, 2] = colored[grain_px, 2] // 3
-            img = Image.fromarray(colored, mode="RGB")
-        else:
-            colored = _get_lut(colormap)[u8]
-            img     = Image.fromarray(colored, mode="RGB")
-
-        if size:
-            if allow_upscale:
-                img = _fit_image_to_box(img, size)
-            else:
-                img.thumbnail(size, Image.LANCZOS)
-        return img
-    except Exception:
-        return None
+    return render_scan_image(
+        arr=arr,
+        colormap=colormap,
+        clip_low=clip_low,
+        clip_high=clip_high,
+        size=size,
+        vmin=vmin,
+        vmax=vmax,
+        allow_upscale=allow_upscale,
+        processing=processing or {},
+    )
 
 
 def _fit_image_to_box(img: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -799,7 +795,8 @@ class ChannelLoader(QRunnable):
     def __init__(self, entry: SxmFile, idx: int, colormap: str,
                  token, w: int, h: int, signals: ChannelSignals,
                  clip_low: float = 1.0, clip_high: float = 99.0,
-                 processing: dict = None):
+                 processing: dict = None,
+                 arr: Optional[np.ndarray] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.signals    = signals
@@ -812,10 +809,12 @@ class ChannelLoader(QRunnable):
         self.clip_low   = clip_low
         self.clip_high  = clip_high
         self.processing = processing or {}
+        self.arr        = arr
 
     def run(self):
         img = render_scan_image(
-            scan_path=self.entry.path,
+            scan_path=None if self.arr is not None else self.entry.path,
+            arr=self.arr,
             plane_idx=self.idx,
             colormap=self.colormap,
             clip_low=self.clip_low,
@@ -837,7 +836,8 @@ class ViewerLoader(QRunnable):
                  size: Optional[tuple[int, int]] = None,
                  plane_idx: int = 0, clip_low: float = 1.0,
                  clip_high: float = 99.0, processing: dict = None,
-                 vmin: Optional[float] = None, vmax: Optional[float] = None):
+                 vmin: Optional[float] = None, vmax: Optional[float] = None,
+                 arr: Optional[np.ndarray] = None):
         super().__init__()
         self.setAutoDelete(True)
         self.signals    = ViewerSignals()
@@ -851,10 +851,12 @@ class ViewerLoader(QRunnable):
         self.processing = processing or {}
         self.vmin       = vmin
         self.vmax       = vmax
+        self.arr        = arr
 
     def run(self):
         img = render_scan_image(
-            scan_path=self.entry.path,
+            scan_path=None if self.arr is not None else self.entry.path,
+            arr=self.arr,
             plane_idx=self.plane_idx,
             colormap=self.colormap,
             clip_low=self.clip_low,
@@ -863,7 +865,7 @@ class ViewerLoader(QRunnable):
             vmin=self.vmin,
             vmax=self.vmax,
             allow_upscale=False,
-            processing=self.processing or None,
+            processing=None if self.arr is not None else (self.processing or None),
         )
         if img is not None:
             self.signals.loaded.emit(pil_to_pixmap(img), self.token)
@@ -1733,9 +1735,10 @@ class _ZoomLabel(QLabel):
             else Qt.ArrowCursor
         )
 
-    def set_source(self, pixmap: QPixmap):
+    def set_source(self, pixmap: QPixmap, reset_zoom: bool = True):
         self._pixmap_orig = pixmap
-        self._zoom = 1.0
+        if reset_zoom:
+            self._zoom = 1.0
         self._apply_zoom()
 
     def zoom_by(self, factor: float):
@@ -2329,6 +2332,7 @@ class ImageViewerDialog(QDialog):
         self._zero_pick_mode: str = "offset"
         self._zero_plane_points_px: list[tuple[int, int]] = []
         self._pending_initial_plane_idx: Optional[int] = max(0, int(initial_plane_idx))
+        self._reset_zoom_on_next_pixmap = True
 
         self._build()
         self._processing_panel.set_state(self._processing)
@@ -2756,25 +2760,31 @@ class ImageViewerDialog(QDialog):
     def _go_prev(self):
         if self._idx > 0:
             self._idx -= 1
-            self._load_current()
+            self._load_current(reset_zoom=True)
 
     def _go_next(self):
         if self._idx < len(self._entries) - 1:
             self._idx += 1
-            self._load_current()
+            self._load_current(reset_zoom=True)
 
     # ── Load / render ──────────────────────────────────────────────────────────
-    def _load_current(self):
+    def _load_current(self, reset_zoom: bool = True):
         entry = self._entries[self._idx]
+        self._load_current_source(entry, reset_zoom=reset_zoom)
+        self._refresh_display_array(reset_zoom_if_shape_changed=not reset_zoom)
+        self._refresh_histogram_and_markers(entry)
+        self._refresh_viewer_pixmap(reset_zoom=reset_zoom)
+
+    def _load_current_source(self, entry: SxmFile, reset_zoom: bool = True):
         self._title_lbl.setText(entry.stem)
         self.setWindowTitle(entry.stem)
         self._pos_lbl.setText(f"{self._idx + 1} / {len(self._entries)}")
         self._prev_btn.setEnabled(self._idx > 0)
         self._next_btn.setEnabled(self._idx < len(self._entries) - 1)
-        self._zoom_lbl.setText("Loading…")
-        self._zoom_lbl.setPixmap(QPixmap())
+        if reset_zoom:
+            self._zoom_lbl.setText("Loading…")
+            self._zoom_lbl.setPixmap(QPixmap())
         self._zoom_lbl.set_markers([])
-        # load raw array; compute display array (with processing if active)
         try:
             _scan = load_scan(entry.path)
             self._set_scan_channel_choices(_scan)
@@ -2800,6 +2810,9 @@ class ImageViewerDialog(QDialog):
             self._scan_format  = ""
             self._scan_plane_names = list(PLANE_NAMES)
             self._scan_plane_units = ["m", "m", "A", "A"]
+
+    def _refresh_display_array(self, reset_zoom_if_shape_changed: bool = False):
+        old_shape = self._display_arr.shape if self._display_arr is not None else None
         # display array: raw with processing applied (no grain overlay — that's visual only)
         if self._raw_arr is not None and self._processing:
             try:
@@ -2808,17 +2821,40 @@ class ImageViewerDialog(QDialog):
                 self._display_arr = self._raw_arr
         else:
             self._display_arr = self._raw_arr
+        new_shape = self._display_arr.shape if self._display_arr is not None else None
+        if reset_zoom_if_shape_changed and old_shape is not None and new_shape != old_shape:
+            self._reset_zoom_on_next_pixmap = True
+
+    def _refresh_histogram_and_markers(self, entry: SxmFile):
         self._update_histogram()
         self._load_spec_markers(entry)
+
+    def _refresh_display_range(self):
+        self._update_histogram()
+        self._refresh_viewer_pixmap(reset_zoom=False)
+
+    def _refresh_processing_display(self):
+        entry = self._entries[self._idx]
+        self._refresh_display_array(reset_zoom_if_shape_changed=True)
+        self._refresh_histogram_and_markers(entry)
+        self._refresh_viewer_pixmap(reset_zoom=False)
+
+    def _refresh_viewer_pixmap(self, reset_zoom: bool = False):
+        if self._display_arr is None:
+            self._zoom_lbl.setText("No image data")
+            self._zoom_lbl.setPixmap(QPixmap())
+            return
         # Resolve display limits (percentile or manual) from current array
         vmin, vmax = self._drs.resolve(self._display_arr) if self._display_arr is not None else (None, None)
-        # load rendered image
+        entry = self._entries[self._idx]
         self._token = object()
         loader = ViewerLoader(entry, self._colormap, self._token, None,
                               self._ch_cb.currentIndex(),
                               self._clip_low, self._clip_high,
-                              self._processing or None,
-                              vmin=vmin, vmax=vmax)
+                              None,
+                              vmin=vmin, vmax=vmax,
+                              arr=self._display_arr)
+        self._reset_zoom_on_next_pixmap = bool(reset_zoom or self._reset_zoom_on_next_pixmap)
         loader.signals.loaded.connect(self._on_loaded)
         self._pool.start(loader)
 
@@ -3142,7 +3178,7 @@ class ImageViewerDialog(QDialog):
             if self._set_zero_plane_btn.isChecked():
                 self._set_zero_plane_btn.setChecked(False)
             self._status_lbl.setText("Zero plane set from 3 reference points.")
-            self._load_current()
+            self._refresh_processing_display()
             return
 
         self._processing['set_zero_xy'] = (x_px, y_px)
@@ -3152,7 +3188,7 @@ class ImageViewerDialog(QDialog):
         if self._set_zero_btn.isChecked():
             self._set_zero_btn.setChecked(False)
         self._status_lbl.setText(f"Zero offset set at pixel ({x_px}, {y_px})")
-        self._load_current()
+        self._refresh_processing_display()
 
     def _refresh_zero_markers(self):
         """Push the current set-zero pick state into _ZoomLabel for drawing.
@@ -3201,7 +3237,7 @@ class ImageViewerDialog(QDialog):
         self._status_lbl.setText("Zero references cleared")
         self._refresh_zero_markers()
         if had_zero:
-            self._load_current()
+            self._refresh_processing_display()
 
     # ── Histogram drag handlers ────────────────────────────────────────────────
     def _on_hist_press(self, event):
@@ -3257,13 +3293,13 @@ class ImageViewerDialog(QDialog):
         vmax_si = hi_x / scale
         self._drs.set_manual(vmin_si, vmax_si)
         self._dragging = None
-        self._load_current()
+        self._refresh_display_range()
 
     def _on_slider_clip(self):
         self._clip_low  = float(self._low_sl.value())
         self._clip_high = float(self._high_sl.value())
         self._drs.set_percentile(self._clip_low, self._clip_high)
-        self._load_current()
+        self._refresh_display_range()
 
     def _on_auto_clip(self):
         """Reset to 1%–99% percentile autoscale."""
@@ -3276,7 +3312,7 @@ class ImageViewerDialog(QDialog):
         self._high_sl.setValue(99)
         self._low_sl.blockSignals(False)
         self._high_sl.blockSignals(False)
-        self._load_current()
+        self._refresh_display_range()
 
     def _on_export_histogram(self):
         """Save the current histogram (bin centres + counts) as a TSV file."""
@@ -3315,14 +3351,16 @@ class ImageViewerDialog(QDialog):
     def _on_channel_changed(self, _: int):
         # Different channels have different physical units — reset manual limits.
         self._drs.reset(self._clip_low, self._clip_high)
-        self._load_current()
+        self._load_current(reset_zoom=True)
 
     @Slot(QPixmap, object)
     def _on_loaded(self, pixmap: QPixmap, token):
         if token is not self._token:
             return
         self._zoom_lbl.setText("")
-        self._zoom_lbl.set_source(pixmap)
+        reset_zoom = self._reset_zoom_on_next_pixmap
+        self._reset_zoom_on_next_pixmap = False
+        self._zoom_lbl.set_source(pixmap, reset_zoom=reset_zoom)
         self._refresh_zero_markers()
         self._refresh_scale_bar()
 
@@ -3403,7 +3441,7 @@ class ImageViewerDialog(QDialog):
             self._processing.pop("periodic_notches", None)
             self._processing.pop("periodic_notch_radius", None)
             self._status_lbl.setText("Periodic FFT filter cleared.")
-        self._load_current()
+        self._refresh_processing_display()
 
     def _on_apply_processing(self):
         wants_filter_roi = self._scope_cb.currentIndex() == 1
@@ -3441,7 +3479,7 @@ class ImageViewerDialog(QDialog):
         else:
             self._processing.pop("patch_interpolate_rect", None)
             self._processing.pop("patch_interpolate_iterations", None)
-        self._load_current()
+        self._refresh_processing_display()
 
     def _on_reset_processing(self):
         """Clear all processing for the current image and reload raw data."""
@@ -3459,7 +3497,7 @@ class ImageViewerDialog(QDialog):
         self._roi_rect_px = None
         self._refresh_zero_markers()
         self._status_lbl.setText("Reset: showing original on-disk data.")
-        self._load_current()
+        self._refresh_processing_display()
 
     def _on_save_png(self):
         entry = self._entries[self._idx]
@@ -4069,7 +4107,7 @@ class BrowseInfoPanel(QWidget):
         self._qi["size"].setText(f"{entry.scan_nm:.1f} nm" if entry.scan_nm is not None else "—")
         self._qi["bias"].setText(f"{entry.bias_mv:.0f} mV" if entry.bias_mv is not None else "—")
         self._qi["setp"].setText(f"{entry.current_pa:.1f} pA" if entry.current_pa is not None else "—")
-        self.load_channels(entry, colormap_key, processing)
+        self.load_channels(entry, colormap_key, processing=None)
         self._load_metadata(entry)
 
     def show_vert_entry(self, entry: VertFile):
@@ -4126,19 +4164,23 @@ class BrowseInfoPanel(QWidget):
         sigs = ChannelSignals()
         sigs.loaded.connect(self._on_ch_loaded)
         self._ch_sigs = sigs
+        planes = []
         try:
             scan = load_scan(entry.path)
             plane_names = list(scan.plane_names)
             n_planes = scan.n_planes
+            planes = list(getattr(scan, "planes", []) or [])
         except Exception:
             plane_names = list(PLANE_NAMES)
             n_planes = len(plane_names)
         self._set_channel_preview_slots(plane_names)
         for i in range(n_planes):
+            arr = planes[i] if i < len(planes) else None
             loader = ChannelLoader(entry, i, colormap_key,
                                    self._ch_token, 124, 98, sigs,
                                    self._clip_low, self._clip_high,
-                                   processing=processing)
+                                   processing=processing,
+                                   arr=arr)
             self._pool.start(loader)
 
     # Back-compat alias used internally
@@ -5318,7 +5360,8 @@ class ProbeFlowWindow(QMainWindow):
             entry = next((e for e in self._grid.get_entries()
                           if e.stem == primary), None)
             if entry and isinstance(entry, SxmFile):
-                self._browse_info.load_channels(entry, self._grid.thumbnail_colormap(), {})
+                self._browse_info.load_channels(
+                    entry, self._grid.thumbnail_colormap(), processing=None)
 
     def _on_map_spectra(self):
         """Open the folder-level spec→image mapping dialog."""
