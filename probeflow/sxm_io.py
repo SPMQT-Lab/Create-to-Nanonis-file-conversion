@@ -4,10 +4,10 @@ Pure-python readers and writers for Nanonis ``.sxm`` files.
 These functions have no Qt / matplotlib dependency so they can be reused by
 the CLI, tests, and batch scripts without pulling in the GUI stack.
 
-An ``.sxm`` file is a text header followed by a fixed-offset binary block of
-one or more big-endian float32 image planes.  The text header ends with the
-marker ``:SCANIT_END:``; the start of the binary block is recorded in
-``src/file_cushions/data_offset.txt`` (generated once from the reference file).
+An ``.sxm`` file is a text header followed by a binary block of one or more
+big-endian float32 image planes.  The text header ends with the marker
+``:SCANIT_END:``; fixed cushion bytes after that marker are recorded in
+``src/file_cushions`` and used to locate the payload.
 
 The public API:
     parse_sxm_header(path) -> dict
@@ -29,13 +29,11 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 # ── Binary layout ────────────────────────────────────────────────────────────
-# The data offset is written during development by the layout-capture step.
-# We read it once lazily to avoid repeated file I/O.
+# Cushion byte lengths are read lazily to avoid repeated file I/O.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CUSHION_DIR = _REPO_ROOT / "src" / "file_cushions"
 
-_DATA_OFFSET_CACHE: Optional[int] = None
 _POST_END_BYTES_CACHE: Optional[bytes] = None
 _PRE_PAYLOAD_BYTES_CACHE: Optional[bytes] = None
 
@@ -65,8 +63,7 @@ def _data_offset_in_file(
     """Compute the byte offset of the binary payload in a given .sxm file.
 
     Locates ``:SCANIT_END:`` and adds the fixed post-marker + pre-payload
-    padding lengths from the cushion.  Unlike :func:`_data_offset`, this is
-    robust to header length variation across files.
+    padding lengths from the cushion, so header length can vary across files.
     """
     idx = raw.find(_SCANIT_END_MARKER)
     if idx < 0:

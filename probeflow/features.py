@@ -35,58 +35,28 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from probeflow._analysis_helpers import (
+    cv2_module,
+    missing_extra_message as _missing_extra_message,
+    to_uint8_for_cv as _to_uint8,
+)
+
 
 # ─── Lazy imports ────────────────────────────────────────────────────────────
 
-def _missing_extra_message(pkg: str, import_name: str) -> str:
-    """Build a diagnostic error message for missing optional dependencies.
-
-    Includes the active interpreter so users can spot env mismatches —
-    the most common cause of "I already pip-installed it" reports.
-    """
-    import sys
-    return (
-        f"{pkg} is required for feature detection but `import {import_name}` failed.\n"
-        f"  Active interpreter: {sys.executable}\n"
-        f"  Python version:     {sys.version.split()[0]}\n"
-        f"Install into THIS interpreter with:\n"
-        f"  {sys.executable} -m pip install 'probeflow[features]'\n"
-        f"(Plain `pip install ...` may target a different environment.)"
-    )
-
-
 def _cv():
-    try:
-        import cv2
-    except ImportError as exc:  # pragma: no cover - deps guard
-        raise ImportError(_missing_extra_message("OpenCV", "cv2")) from exc
-    return cv2
+    return cv2_module("feature detection")
 
 
 def _sklearn():
     try:
         import sklearn  # noqa: F401
     except ImportError as exc:  # pragma: no cover - deps guard
-        raise ImportError(_missing_extra_message("scikit-learn", "sklearn")) from exc
+        raise ImportError(
+            _missing_extra_message("scikit-learn", "sklearn", "feature detection")
+        ) from exc
     import sklearn
     return sklearn
-
-
-# ─── Array helpers ───────────────────────────────────────────────────────────
-
-def _to_uint8(arr: np.ndarray, clip_low: float = 1.0,
-              clip_high: float = 99.0) -> np.ndarray:
-    """Percentile-clip and rescale to uint8 for OpenCV operations.
-
-    We keep the original float array for physics; the uint8 copy is purely a
-    bridge to OpenCV's 8-bit image APIs.
-    """
-    from probeflow.display import array_to_uint8
-
-    try:
-        return array_to_uint8(arr, clip_percentiles=(clip_low, clip_high))
-    except ValueError:
-        return np.zeros(np.asarray(arr).shape, dtype=np.uint8)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

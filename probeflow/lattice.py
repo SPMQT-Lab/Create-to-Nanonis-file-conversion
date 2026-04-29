@@ -20,10 +20,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from probeflow._analysis_helpers import cv2_module, to_uint8_for_cv as _to_uint8
 
-# ─── Shared helpers (lazy cv2 + uint8 conversion live in features) ───────────
+# ─── Lazy imports ────────────────────────────────────────────────────────────
 
-from probeflow.features import _cv, _to_uint8
+def _cv():
+    return cv2_module("lattice extraction")
 
 
 def _sk_cluster():
