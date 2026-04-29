@@ -39,7 +39,9 @@ class SpecData:
     channels : dict[str, np.ndarray]
         Named data channels. Known channels are converted to SI units:
         'I' (A), 'Z' (m), 'V' (V). Unknown decoded channels are preserved
-        in raw numeric units with conservative unit labels.
+        in raw numeric units with conservative unit labels. Interpreted
+        dI/dz Createc files expose the moving feedback-height counts as
+        'Z feedback' and the static programmed column as 'Z command'.
         For bias sweeps, channels['V'] equals x_array and is redundant;
         for time traces it holds the (near-constant) measurement bias.
     x_array : np.ndarray
@@ -231,16 +233,13 @@ def _metadata_from_vert_report(
     )
     bias_mv = _f(bias_raw)
     comment = hdr.get("Titel", "").strip() or None
-    order = _public_channel_order(report)
-    units = {
-        info.canonical_name: info.unit
-        for info in report.channel_info
-        if info.canonical_name in order
-    }
     measurement = createc_vert_measurement_metadata(
         report,
         measurement_mode=measurement_mode,
     )
+    measurement = _with_public_height_aliases(report, measurement)
+    order = _public_channel_order(report, measurement)
+    units = _public_channel_units(report, measurement, order)
 
     metadata: dict[str, Any] = {
         "filename": report.path.name,
@@ -265,6 +264,9 @@ def _metadata_from_vert_report(
         "measurement_family": measurement["measurement_family"],
         "feedback_mode": measurement["feedback_mode"],
         "derivative_label": measurement["derivative_label"],
+        "height_channel": measurement.get("height_channel"),
+        "height_source_channel": measurement.get("height_source_channel"),
+        "z_command_channel": measurement.get("z_command_channel"),
         "measurement_confidence": measurement["confidence"],
         "measurement_evidence": list(measurement["evidence"]),
     }
@@ -281,9 +283,14 @@ def _metadata_from_vert_report(
 
 def _scaled_channels_from_vert_report(
     report: CreatecVertDecodeReport,
+    measurement: dict[str, Any] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, str]]:
     if report.raw_columns is None:
         raise ValueError("VERT report does not include raw numeric arrays")
+
+    if measurement is None:
+        measurement = createc_vert_measurement_metadata(report)
+    measurement = _with_public_height_aliases(report, measurement)
 
     channels: dict[str, np.ndarray] = {}
     y_units: dict[str, str] = {}
@@ -291,19 +298,104 @@ def _scaled_channels_from_vert_report(
         raw = report.raw_columns.get(info.raw_name)
         if raw is None:
             continue
-        channels[info.canonical_name] = np.asarray(
+        public_name = _public_channel_name(info.canonical_name, measurement)
+        channels[public_name] = np.asarray(
             raw * info.scale_factor,
             dtype=np.float64,
         )
-        y_units[info.canonical_name] = info.unit
+        y_units[public_name] = _public_channel_unit(
+            info.canonical_name,
+            info.unit,
+            measurement,
+        )
     return channels, y_units
 
 
-def _public_channel_order(report: CreatecVertDecodeReport) -> list[str]:
-    decoded = [info.canonical_name for info in report.channel_info]
-    preferred = [name for name in ("I", "Z", "V") if name in decoded]
+def _public_channel_order(
+    report: CreatecVertDecodeReport,
+    measurement: dict[str, Any] | None = None,
+) -> list[str]:
+    if measurement is None:
+        measurement = createc_vert_measurement_metadata(report)
+    decoded = [
+        _public_channel_name(info.canonical_name, measurement)
+        for info in report.channel_info
+    ]
+    if _has_feedback_height_alias(measurement):
+        preferred_names = (
+            "I",
+            "Z feedback",
+            "dI/dV",
+            "di_q",
+            "V",
+            "Z command",
+        )
+    else:
+        preferred_names = ("I", "Z", "V")
+    preferred = [name for name in preferred_names if name in decoded]
     rest = [name for name in decoded if name not in preferred]
     return preferred + rest
+
+
+def _public_channel_units(
+    report: CreatecVertDecodeReport,
+    measurement: dict[str, Any],
+    order: list[str],
+) -> dict[str, str]:
+    units = {
+        _public_channel_name(info.canonical_name, measurement): _public_channel_unit(
+            info.canonical_name,
+            info.unit,
+            measurement,
+        )
+        for info in report.channel_info
+    }
+    return {name: units[name] for name in order if name in units}
+
+
+def _public_channel_name(name: str, measurement: dict[str, Any]) -> str:
+    if _has_feedback_height_alias(measurement):
+        if name == "Raw column 9":
+            return "Z feedback"
+        if name == "Z":
+            return "Z command"
+    return name
+
+
+def _public_channel_unit(
+    name: str,
+    unit: str,
+    measurement: dict[str, Any],
+) -> str:
+    if _has_feedback_height_alias(measurement) and name == "Raw column 9":
+        return "DAC"
+    return unit
+
+
+def _has_feedback_height_alias(measurement: dict[str, Any]) -> bool:
+    return (
+        measurement.get("measurement_family") == "iz"
+        and measurement.get("height_source_channel") == "Raw column 9"
+    )
+
+
+def _with_public_height_aliases(
+    report: CreatecVertDecodeReport,
+    measurement: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach public dI/dz height aliases when the raw feedback column exists."""
+
+    if (
+        measurement.get("measurement_family") == "iz"
+        and "Raw column 9" in report.column_names
+    ):
+        measurement = dict(measurement)
+        measurement["height_channel"] = "Z feedback"
+        measurement["height_source_channel"] = "Raw column 9"
+        if "Z" in report.column_names:
+            measurement["z_command_channel"] = "Z command"
+        return measurement
+    return measurement
 
 
 def _default_spec_channels(channel_order: list[str]) -> list[str]:
@@ -338,7 +430,6 @@ def _read_createc_vert(
     if report.raw_columns is None:
         raise ValueError(f"{path.name}: internal VERT report has no numeric arrays")
 
-    channels, y_units = _scaled_channels_from_vert_report(report)
     metadata, _bias, _comment, position, channel_order, _units = (
         _metadata_from_vert_report(
             report,
@@ -346,6 +437,11 @@ def _read_createc_vert(
             measurement_mode=measurement_mode,
         )
     )
+    measurement = {
+        "measurement_family": metadata.get("measurement_family"),
+        "height_source_channel": metadata.get("height_source_channel"),
+    }
+    channels, y_units = _scaled_channels_from_vert_report(report, measurement)
 
     idx = report.raw_columns.get("idx")
     if idx is None:
@@ -396,6 +492,9 @@ def _apply_measurement_override(
                 "measurement_family": "iz",
                 "feedback_mode": "on",
                 "derivative_label": "dI/dz",
+                "height_channel": metadata.get("height_channel"),
+                "height_source_channel": metadata.get("height_source_channel"),
+                "z_command_channel": metadata.get("z_command_channel"),
                 "measurement_confidence": "override",
                 "measurement_evidence": ["measurement_mode override: iz"],
             }
@@ -407,6 +506,9 @@ def _apply_measurement_override(
                 "measurement_family": "sts",
                 "feedback_mode": metadata.get("feedback_mode", "unknown"),
                 "derivative_label": metadata.get("derivative_label", "dI/dV"),
+                "height_channel": metadata.get("height_channel"),
+                "height_source_channel": metadata.get("height_source_channel"),
+                "z_command_channel": metadata.get("z_command_channel"),
                 "measurement_confidence": (
                     "override" if mode == "sts" else metadata.get(
                         "measurement_confidence",

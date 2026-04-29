@@ -733,18 +733,28 @@ class TestMeasurementInterpretation:
         assert spec.metadata["sweep_type"] == "bias_sweep"
         assert spec.metadata["measurement_family"] == "iz"
         assert spec.metadata["derivative_label"] == "dI/dz"
+        assert spec.metadata["height_channel"] == "Z feedback"
+        assert spec.metadata["height_source_channel"] == "Raw column 9"
+        assert spec.metadata["z_command_channel"] == "Z command"
         assert spec.channel_order == [
             "I",
-            "Z",
-            "V",
-            "X",
+            "Z feedback",
             "dI/dV",
+            "di_q",
+            "V",
+            "Z command",
+            "X",
             "ADC0",
             "NA02",
-            "di_q",
-            "Raw column 9",
         ]
+        assert "Raw column 9" not in spec.channels
+        assert "Z" not in spec.channels
+        assert spec.y_units["Z feedback"] == "DAC"
+        assert spec.y_units["Z command"] == "m"
+        assert np.ptp(spec.channels["Z feedback"]) > 0
+        assert np.allclose(spec.channels["Z command"], 0.0)
         assert meta.channels == tuple(spec.channel_order)
+        assert meta.units == tuple(spec.y_units[ch] for ch in spec.channel_order)
 
     def test_measurement_mode_override_takes_precedence(self, tmp_path):
         f = _write_createc_vert(

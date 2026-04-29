@@ -1025,6 +1025,7 @@ def _cmd_spec_info(args) -> int:
     setup_logging(args.verbose)
     from probeflow.spec_io import read_spec_file
     spec = read_spec_file(args.input)
+    channels = list(spec.channel_order) if spec.channel_order else list(spec.channels.keys())
     if args.json:
         import json as _json
         out = {
@@ -1036,7 +1037,7 @@ def _cmd_spec_info(args) -> int:
             "measurement_confidence": spec.metadata.get("measurement_confidence"),
             "measurement_evidence": spec.metadata.get("measurement_evidence"),
             "n_points": spec.metadata["n_points"],
-            "channels": list(spec.channels.keys()),
+            "channels": channels,
             "x_label": spec.x_label,
             "x_unit": spec.x_unit,
             "position_m": list(spec.position),
@@ -1053,7 +1054,7 @@ def _cmd_spec_info(args) -> int:
         if spec.metadata.get("derivative_label"):
             print(f"derivative  : {spec.metadata['derivative_label']}")
         print(f"n_points    : {spec.metadata['n_points']}")
-        print(f"channels    : {', '.join(spec.channels)}")
+        print(f"channels    : {', '.join(channels)}")
         print(f"x_axis      : {spec.x_label}")
         x = spec.x_array
         print(f"x_range     : {x.min():.4g} to {x.max():.4g} {spec.x_unit}")

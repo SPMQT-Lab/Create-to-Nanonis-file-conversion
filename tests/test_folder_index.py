@@ -231,6 +231,9 @@ class TestProbeFlowItemContract:
         item = next(it for it in items if it.path == _CREATEC_DIDZ_VERT)
         assert item.metadata["measurement_family"] == "iz"
         assert item.metadata["derivative_label"] == "dI/dz"
+        assert item.metadata["height_channel"] == "Z feedback"
+        assert "Z feedback" in item.channels
+        assert "Raw column 9" not in item.channels
 
     def test_spectrum_indexing_does_not_call_full_reader(self, tmp_path, monkeypatch):
         shutil.copy(_CREATEC_VERT, tmp_path / _CREATEC_VERT.name)

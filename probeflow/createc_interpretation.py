@@ -75,6 +75,7 @@ def createc_vert_measurement_metadata(
     vert_feedback_mode = _i(hdr.get("VertFBMode"), None)
     has_lockin = any(name in channel_names for name in ("dI/dV", "di_q", "di2_q"))
     has_z_i = {"Z", "I"}.issubset(channel_names)
+    has_raw_feedback_height = "Raw column 9" in channel_names
     z_points_static = _z_points_static(hdr)
 
     evidence: list[str] = []
@@ -87,13 +88,18 @@ def createc_vert_measurement_metadata(
     if has_lockin:
         evidence.append("lock-in derivative channel present")
     if z_points_static:
-        evidence.append("Zpoint program is static")
+        evidence.append("Z command program is static")
+    if has_raw_feedback_height:
+        evidence.append("Raw column 9 carries feedback height counts")
 
     if feedback_on and has_z_i and has_lockin and z_points_static:
         return {
             "measurement_family": "iz",
             "feedback_mode": "on",
             "derivative_label": "dI/dz",
+            "height_channel": "Z feedback" if has_raw_feedback_height else "Z",
+            "height_source_channel": "Raw column 9" if has_raw_feedback_height else "Z",
+            "z_command_channel": "Z command" if has_raw_feedback_height else None,
             "confidence": "medium",
             "evidence": evidence,
         }
@@ -102,6 +108,9 @@ def createc_vert_measurement_metadata(
         "measurement_family": "sts",
         "feedback_mode": "on" if feedback_on else "off",
         "derivative_label": "dI/dV" if "dI/dV" in channel_names else None,
+        "height_channel": None,
+        "height_source_channel": None,
+        "z_command_channel": None,
         "confidence": "low" if has_lockin else "medium",
         "evidence": evidence,
     }
@@ -157,6 +166,9 @@ def _override_measurement(mode: str) -> dict[str, Any]:
             "measurement_family": "iz",
             "feedback_mode": "on",
             "derivative_label": "dI/dz",
+            "height_channel": None,
+            "height_source_channel": None,
+            "z_command_channel": None,
             "confidence": "override",
             "evidence": ["measurement_mode override: iz"],
         }
@@ -164,6 +176,9 @@ def _override_measurement(mode: str) -> dict[str, Any]:
         "measurement_family": "sts",
         "feedback_mode": "unknown",
         "derivative_label": "dI/dV",
+        "height_channel": None,
+        "height_source_channel": None,
+        "z_command_channel": None,
         "confidence": "override",
         "evidence": ["measurement_mode override: sts"],
     }
