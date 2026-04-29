@@ -2458,10 +2458,11 @@ class ImageViewerDialog(QDialog):
 
         # Histogram actions
         auto_row = QHBoxLayout()
-        auto_btn = QPushButton("Reset bounds")
+        auto_btn = QPushButton("Auto")
         auto_btn.setFont(QFont("Helvetica", 8))
         auto_btn.setFixedHeight(22)
-        auto_btn.setToolTip("Reset bounds to 1%–99% percentile autoscale")
+        auto_btn.setToolTip(
+            "Autoscale display bounds to the current image's 1%–99% percentiles.")
         auto_btn.clicked.connect(self._on_auto_clip)
         hist_export_btn = QPushButton("Export histogram…")
         hist_export_btn.setFont(QFont("Helvetica", 8))
