@@ -7,7 +7,14 @@ import numpy as np
 import pytest
 
 from probeflow.dat_png import dat_to_hdr_imgs
-from probeflow.dat_sxm import process_dat, convert_dat_to_sxm
+from probeflow.dat_sxm import (
+    convert_dat_to_sxm,
+    load_layout_and_format,
+    process_dat,
+    reconstruct_from_hdr_imgs,
+)
+from probeflow.metadata import read_scan_metadata
+from probeflow.scan import load_scan
 
 
 # ─── PNG conversion ───────────────────────────────────────────────────────────
@@ -109,6 +116,23 @@ class TestProcessDat:
 # ─── SXM full conversion ──────────────────────────────────────────────────────
 
 class TestConvertDatToSxm:
+    @staticmethod
+    def _write_legacy_sxm(dat: Path, out_path: Path, cushion_dir: Path) -> Path:
+        hdr, imgs, _num_chan = process_dat(dat)
+        layout, header_format = load_layout_and_format(cushion_dir)
+        reconstruct_from_hdr_imgs(
+            hdr=hdr,
+            imgs=imgs,
+            header_format=header_format,
+            post_end_bytes=layout["post_end_bytes"],
+            pre_payload_bytes=layout["pre_payload_bytes"],
+            out_path=out_path,
+            tail_bytes=layout["tail_bytes"],
+            force_data_offset=layout["data_offset"],
+            filler_char=b" ",
+        )
+        return out_path
+
     def test_uses_validated_scan_writer_path(self, tmp_path, monkeypatch):
         import probeflow.dat_sxm as dat_sxm_mod
 
@@ -145,6 +169,55 @@ class TestConvertDatToSxm:
             "clip_low": 2.0,
             "clip_high": 98.0,
         }
+
+    def test_validated_conversion_roundtrips_like_legacy_reconstruction(
+        self, first_sample_dat, tmp_path, cushion_dir
+    ):
+        legacy_path = self._write_legacy_sxm(
+            first_sample_dat,
+            tmp_path / "legacy" / f"{first_sample_dat.stem}.sxm",
+            cushion_dir,
+        )
+        modern_out = tmp_path / "modern"
+        convert_dat_to_sxm(first_sample_dat, modern_out, cushion_dir)
+        modern_path = modern_out / f"{first_sample_dat.stem}.sxm"
+
+        legacy = load_scan(legacy_path)
+        modern = load_scan(modern_path)
+
+        assert legacy.dims == modern.dims
+        assert legacy.plane_names == modern.plane_names
+        assert legacy.plane_units == modern.plane_units
+        assert np.allclose(legacy.scan_range_m, modern.scan_range_m)
+        assert legacy.n_planes == modern.n_planes
+        for old_plane, new_plane in zip(legacy.planes, modern.planes):
+            np.testing.assert_array_equal(old_plane, new_plane)
+
+    def test_validated_conversion_metadata_matches_legacy_reconstruction(
+        self, first_sample_dat, tmp_path, cushion_dir
+    ):
+        legacy_path = self._write_legacy_sxm(
+            first_sample_dat,
+            tmp_path / "legacy" / f"{first_sample_dat.stem}.sxm",
+            cushion_dir,
+        )
+        modern_out = tmp_path / "modern"
+        convert_dat_to_sxm(first_sample_dat, modern_out, cushion_dir)
+        modern_path = modern_out / f"{first_sample_dat.stem}.sxm"
+
+        legacy = read_scan_metadata(legacy_path)
+        modern = read_scan_metadata(modern_path)
+
+        assert legacy.source_format == modern.source_format == "nanonis_sxm"
+        assert legacy.item_type == modern.item_type == "scan"
+        assert legacy.display_name == modern.display_name
+        assert legacy.shape == modern.shape
+        assert legacy.plane_names == modern.plane_names
+        assert legacy.units == modern.units
+        assert np.allclose(legacy.scan_range, modern.scan_range)
+        assert legacy.bias == modern.bias
+        assert legacy.setpoint == modern.setpoint
+        assert legacy.acquisition_datetime == modern.acquisition_datetime
 
     def test_produces_sxm_file(self, first_sample_dat, tmp_path, cushion_dir):
         out_dir = tmp_path / "sxm_out"
