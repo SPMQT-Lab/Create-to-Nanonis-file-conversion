@@ -236,6 +236,7 @@ class _ZoomLabel(QLabel):
         self._selection_start = None
         self._selection_drag = None
         self._selection_geometry = None
+        self._selection_handle_idx: Optional[int] = None
         self._polygon_points: list[tuple[float, float]] = []
         self.setMouseTracking(True)
 
@@ -250,6 +251,7 @@ class _ZoomLabel(QLabel):
         self._selection_tool = kind
         self._selection_start = None
         self._selection_drag = None
+        self._selection_handle_idx = None
         self._polygon_points = []
         self.update()
         self._update_cursor()
@@ -258,6 +260,7 @@ class _ZoomLabel(QLabel):
         self._selection_start = None
         self._selection_drag = None
         self._selection_geometry = None
+        self._selection_handle_idx = None
         self._polygon_points = []
         self.update()
 
@@ -361,6 +364,100 @@ class _ZoomLabel(QLabel):
             for x, y in points
         ]
 
+    def _constrain_bounds(self, x0, y0, x1, y1, modifiers=Qt.NoModifier):
+        if not (modifiers & Qt.ShiftModifier):
+            return self._norm_bounds(x0, y0, x1, y1)
+        dx = (float(x1) - float(x0)) * self.width()
+        dy = (float(y1) - float(y0)) * self.height()
+        side = min(abs(dx), abs(dy))
+        if side <= 0:
+            return self._norm_bounds(x0, y0, x1, y1)
+        sx = 1.0 if dx >= 0 else -1.0
+        sy = 1.0 if dy >= 0 else -1.0
+        x1 = float(x0) + sx * side / float(max(1, self.width()))
+        y1 = float(y0) + sy * side / float(max(1, self.height()))
+        return self._norm_bounds(x0, y0, x1, y1)
+
+    def _geometry_from_drag(self, kind: str, start, end, modifiers=Qt.NoModifier):
+        fx0, fy0 = start
+        fx1, fy1 = end
+        if kind == "line":
+            return {"kind": "line", "points_frac": [(fx0, fy0), (fx1, fy1)]}
+        return {
+            "kind": kind,
+            "bounds_frac": self._constrain_bounds(fx0, fy0, fx1, fy1, modifiers),
+        }
+
+    def _selection_handles_frac(self, geometry=None):
+        geometry = geometry or self._selection_geometry
+        if not geometry:
+            return []
+        kind = geometry.get("kind")
+        if kind in {"rectangle", "ellipse"} and geometry.get("bounds_frac"):
+            x0, y0, x1, y1 = geometry["bounds_frac"]
+            return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if kind in {"polygon", "line"} and geometry.get("points_frac"):
+            return list(geometry["points_frac"])
+        return []
+
+    def _hit_selection_handle(self, pos) -> Optional[int]:
+        if not self._selection_geometry:
+            return None
+        best_idx = None
+        best_dist2 = float("inf")
+        for i, (fx, fy) in enumerate(self._selection_handles_frac()):
+            px = float(fx) * self.width()
+            py = float(fy) * self.height()
+            dist2 = (pos.x() - px) ** 2 + (pos.y() - py) ** 2
+            if dist2 < best_dist2:
+                best_idx = i
+                best_dist2 = dist2
+        return best_idx if best_dist2 <= 10.0 ** 2 else None
+
+    def _geometry_with_dragged_handle(self, handle_idx: int, end, modifiers=Qt.NoModifier):
+        geometry = self._selection_geometry
+        if not geometry:
+            return None
+        kind = geometry.get("kind")
+        fx, fy = end
+        if kind in {"rectangle", "ellipse"} and geometry.get("bounds_frac"):
+            corners = self._selection_handles_frac(geometry)
+            if handle_idx < 0 or handle_idx >= len(corners):
+                return None
+            anchor = corners[(handle_idx + 2) % 4]
+            return self._geometry_from_drag(kind, anchor, (fx, fy), modifiers)
+        if kind in {"polygon", "line"} and geometry.get("points_frac"):
+            points = list(geometry["points_frac"])
+            if handle_idx < 0 or handle_idx >= len(points):
+                return None
+            points[handle_idx] = (fx, fy)
+            if kind == "line":
+                return {"kind": "line", "points_frac": points[:2]}
+            return {"kind": "polygon", "points_frac": points}
+        return None
+
+    def _geometry_is_large_enough(self, geometry) -> bool:
+        if not geometry:
+            return False
+        kind = geometry.get("kind")
+        if kind in {"rectangle", "ellipse"} and geometry.get("bounds_frac"):
+            bounds = geometry["bounds_frac"]
+            return (
+                abs(bounds[2] - bounds[0]) * self.width() >= 3
+                and abs(bounds[3] - bounds[1]) * self.height() >= 3
+            )
+        if kind == "line" and geometry.get("points_frac"):
+            points = self._selection_points_px(geometry["points_frac"][:2])
+            if len(points) < 2:
+                return False
+            return (
+                (points[1].x() - points[0].x()) ** 2
+                + (points[1].y() - points[0].y()) ** 2
+            ) >= 3 ** 2
+        if kind == "polygon" and geometry.get("points_frac"):
+            return len(geometry["points_frac"]) >= 3
+        return False
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._pixmap_orig is None:
@@ -442,22 +539,28 @@ class _ZoomLabel(QLabel):
         painter.restore()
 
     def mouseMoveEvent(self, event):
+        if self._selection_handle_idx is not None and self._selection_geometry is not None:
+            geometry = self._geometry_with_dragged_handle(
+                self._selection_handle_idx,
+                self._frac_from_pos(event.pos()),
+                event.modifiers(),
+            )
+            if geometry is not None:
+                self._selection_drag = geometry
+                self.update()
+            return
         if (
             self._selection_tool in {"rectangle", "ellipse", "line"}
             and self._selection_start is not None
         ):
             fx0, fy0 = self._selection_start
             fx1, fy1 = self._frac_from_pos(event.pos())
-            if self._selection_tool == "line":
-                self._selection_drag = {
-                    "kind": "line",
-                    "points_frac": [(fx0, fy0), (fx1, fy1)],
-                }
-            else:
-                self._selection_drag = {
-                    "kind": self._selection_tool,
-                    "bounds_frac": self._norm_bounds(fx0, fy0, fx1, fy1),
-                }
+            self._selection_drag = self._geometry_from_drag(
+                self._selection_tool,
+                (fx0, fy0),
+                (fx1, fy1),
+                event.modifiers(),
+            )
             self.update()
             return
         if self._show_markers and self._markers and self._pixmap_orig is not None:
@@ -480,6 +583,13 @@ class _ZoomLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._pixmap_orig is not None:
+            handle_idx = self._hit_selection_handle(event.pos())
+            if handle_idx is not None:
+                self._selection_handle_idx = handle_idx
+                self._selection_drag = dict(self._selection_geometry)
+                self.update()
+                return
         if (event.button() == Qt.LeftButton and self._selection_tool == "polygon"
                 and self._pixmap_orig is not None):
             self._polygon_points.append(self._frac_from_pos(event.pos()))
@@ -517,6 +627,25 @@ class _ZoomLabel(QLabel):
     def mouseReleaseEvent(self, event):
         if (
             event.button() == Qt.LeftButton
+            and self._selection_handle_idx is not None
+            and self._selection_geometry is not None
+        ):
+            geometry = self._geometry_with_dragged_handle(
+                self._selection_handle_idx,
+                self._frac_from_pos(event.pos()),
+                event.modifiers(),
+            )
+            self._selection_handle_idx = None
+            self._selection_drag = None
+            if geometry is None or not self._geometry_is_large_enough(geometry):
+                self.update()
+                return
+            self._selection_geometry = geometry
+            self.selection_changed.emit(dict(geometry))
+            self.update()
+            return
+        if (
+            event.button() == Qt.LeftButton
             and self._selection_tool in {"rectangle", "ellipse", "line"}
             and self._selection_start is not None
             and self._pixmap_orig is not None
@@ -525,23 +654,26 @@ class _ZoomLabel(QLabel):
             fx1, fy1 = self._frac_from_pos(event.pos())
             self._selection_start = None
             if self._selection_tool == "line":
-                geometry = {
-                    "kind": "line",
-                    "points_frac": [(fx0, fy0), (fx1, fy1)],
-                }
+                geometry = self._geometry_from_drag(
+                    "line",
+                    (fx0, fy0),
+                    (fx1, fy1),
+                    event.modifiers(),
+                )
             else:
-                bounds = self._norm_bounds(fx0, fy0, fx1, fy1)
-                if (
-                    abs(bounds[2] - bounds[0]) * self.width() < 3
-                    or abs(bounds[3] - bounds[1]) * self.height() < 3
-                ):
-                    self._selection_drag = None
-                    self.update()
-                    return
+                bounds = self._constrain_bounds(fx0, fy0, fx1, fy1, event.modifiers())
                 geometry = {
                     "kind": self._selection_tool,
                     "bounds_frac": bounds,
                 }
+                if not self._geometry_is_large_enough(geometry):
+                    self._selection_drag = None
+                    self.update()
+                    return
+            if not self._geometry_is_large_enough(geometry):
+                self._selection_drag = None
+                self.update()
+                return
             self._selection_drag = None
             self._selection_geometry = geometry
             self.selection_changed.emit(dict(geometry))

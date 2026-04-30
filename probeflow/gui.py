@@ -641,6 +641,7 @@ class ImageViewerDialog(QDialog):
         self._selection_geometry: Optional[dict] = None
         self._zero_pick_mode: str = "plane"
         self._zero_plane_points_px: list[tuple[int, int]] = []
+        self._zero_markers_hidden = False
         self._pending_initial_plane_idx: Optional[int] = max(0, int(initial_plane_idx))
         self._reset_zoom_on_next_pixmap = True
 
@@ -727,16 +728,17 @@ class ImageViewerDialog(QDialog):
         self._selection_group = QButtonGroup(self)
         self._selection_group.setExclusive(True)
         for key, label, tip in (
-            ("none", "↖", "Pointer / no selection tool"),
-            ("rectangle", "▭", "Rectangular area selection"),
-            ("ellipse", "○", "Elliptical area selection"),
-            ("polygon", "◇", "Polygon area selection; double-click to finish"),
-            ("line", "╱", "Line selection for display/status only"),
+            ("none", "Pointer", "Pointer / no selection tool"),
+            ("rectangle", "Rect.", "Rectangular area selection"),
+            ("ellipse", "Ellipse", "Elliptical area selection"),
+            ("polygon", "Polygon", "Polygon area selection; double-click to finish"),
+            ("line", "Line", "Line selection for display/status only"),
         ):
             btn = QPushButton(label)
             btn.setCheckable(True)
-            btn.setFixedSize(28, 24)
-            btn.setFont(QFont("Helvetica", 10, QFont.Bold))
+            btn.setFixedHeight(24)
+            btn.setMinimumWidth(44)
+            btn.setFont(QFont("Helvetica", 8))
             btn.setToolTip(tip)
             self._selection_group.addButton(btn)
             btn.setProperty("selection_tool", key)
@@ -1496,6 +1498,7 @@ class ImageViewerDialog(QDialog):
             self._set_selection_tool("none")
             self._zero_pick_mode = "plane"
             self._zero_plane_points_px = []
+            self._zero_markers_hidden = False
             self._status_lbl.setText("Click 3 reference points to define the zero plane.")
         elif self._zero_pick_mode == "plane" and len(self._zero_plane_points_px) < 3:
             self._zero_plane_points_px = []
@@ -1548,6 +1551,7 @@ class ImageViewerDialog(QDialog):
         y_px = max(0, min(y_px, Ny - 1))
 
         if self._zero_pick_mode == "plane" and self._set_zero_plane_btn.isChecked():
+            self._zero_markers_hidden = False
             self._zero_plane_points_px.append((x_px, y_px))
             n = len(self._zero_plane_points_px)
             self._refresh_zero_markers()  # show partial pick immediately
@@ -1578,6 +1582,9 @@ class ImageViewerDialog(QDialog):
         if self._raw_arr is None:
             self._zoom_lbl.set_zero_markers([])
             return
+        if self._zero_markers_hidden:
+            self._zoom_lbl.set_zero_markers([])
+            return
         Ny, Nx = self._raw_arr.shape
         denom_x = max(1, Nx - 1)
         denom_y = max(1, Ny - 1)
@@ -1602,17 +1609,14 @@ class ImageViewerDialog(QDialog):
         self._zoom_lbl.set_zero_markers(markers)
 
     def _on_clear_set_zero(self):
-        had_zero = any(k in self._processing for k in ("set_zero_xy", "set_zero_plane_points"))
-        self._processing.pop('set_zero_xy', None)
-        self._processing.pop('set_zero_plane_points', None)
-        self._processing.pop('set_zero_patch', None)
         self._zero_plane_points_px = []
+        self._zero_markers_hidden = True
         if self._set_zero_plane_btn.isChecked():
             self._set_zero_plane_btn.setChecked(False)
-        self._status_lbl.setText("Zero references cleared")
-        self._refresh_zero_markers()
-        if had_zero:
-            self._refresh_processing_display()
+        self._zoom_lbl.set_zero_markers([])
+        self._status_lbl.setText(
+            "Zero reference markers hidden. Processing is unchanged; use Reset to original to undo leveling."
+        )
 
     # ── Histogram drag handlers ────────────────────────────────────────────────
     def _on_hist_press(self, event):
@@ -1894,6 +1898,7 @@ class ImageViewerDialog(QDialog):
         if self._set_zero_plane_btn.isChecked():
             self._set_zero_plane_btn.setChecked(False)
         self._zero_plane_points_px = []
+        self._zero_markers_hidden = False
         self._roi_rect_px = None
         self._selection_geometry = None
         self._zoom_lbl.clear_roi()

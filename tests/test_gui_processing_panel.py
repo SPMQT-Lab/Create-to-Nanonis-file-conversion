@@ -93,6 +93,17 @@ def test_viewer_dialog_keeps_standard_processing_visible(qapp, monkeypatch):
     assert not hasattr(dlg, "_set_zero_btn")
     assert not hasattr(dlg, "_selection_widget")
     assert hasattr(dlg, "_selection_group")
+    labels = {
+        btn.property("selection_tool"): btn.text()
+        for btn in dlg._selection_group.buttons()
+    }
+    assert labels == {
+        "none": "Pointer",
+        "rectangle": "Rect.",
+        "ellipse": "Ellipse",
+        "polygon": "Polygon",
+        "line": "Line",
+    }
     assert dlg._set_zero_plane_btn.isVisible() is True
     assert dlg._advanced_widget.isVisible() is False
     assert dlg._spec_overlay_widget.isVisible() is False
@@ -227,6 +238,70 @@ def test_viewer_zero_plane_cancel_clears_partial_markers(qapp, monkeypatch):
 
     dlg.close()
     dlg.deleteLater()
+
+
+def test_viewer_clear_zero_references_keeps_leveling_processing(qapp, monkeypatch):
+    from probeflow.gui import ImageViewerDialog, SxmFile, THEMES
+
+    calls = {"refresh": 0, "markers": None}
+    monkeypatch.setattr(ImageViewerDialog, "_load_current", lambda self: None)
+    monkeypatch.setattr(
+        ImageViewerDialog,
+        "_refresh_processing_display",
+        lambda self: calls.__setitem__("refresh", calls["refresh"] + 1),
+    )
+
+    entry = SxmFile(path=Path("/tmp/example.sxm"), stem="example", Nx=8, Ny=8)
+    dlg = ImageViewerDialog(entry, [entry], "gray", THEMES["dark"])
+    dlg._raw_arr = np.zeros((10, 10), dtype=float)
+    dlg._processing = {
+        "set_zero_plane_points": [(0, 0), (4, 4), (9, 9)],
+        "set_zero_patch": 1,
+        "align_rows": "median",
+    }
+    dlg._zoom_lbl.set_zero_markers = lambda markers: calls.__setitem__("markers", markers)
+
+    dlg._on_clear_set_zero()
+
+    assert dlg._processing["set_zero_plane_points"] == [(0, 0), (4, 4), (9, 9)]
+    assert dlg._processing["set_zero_patch"] == 1
+    assert calls["markers"] == []
+    assert calls["refresh"] == 0
+
+    dlg.close()
+    dlg.deleteLater()
+
+
+def test_zoom_label_shift_constrains_area_selection_to_square(qapp):
+    from PySide6.QtCore import Qt
+    from probeflow.gui_viewer_widgets import _ZoomLabel
+
+    label = _ZoomLabel()
+    label.resize(200, 100)
+
+    bounds = label._constrain_bounds(0.1, 0.1, 0.8, 0.3, Qt.ShiftModifier)
+    width_px = abs(bounds[2] - bounds[0]) * label.width()
+    height_px = abs(bounds[3] - bounds[1]) * label.height()
+
+    assert abs(width_px - height_px) < 1e-9
+
+
+def test_zoom_label_endpoint_drag_updates_existing_selection(qapp):
+    from probeflow.gui_viewer_widgets import _ZoomLabel
+
+    label = _ZoomLabel()
+    label.resize(200, 100)
+    label._selection_geometry = {
+        "kind": "rectangle",
+        "bounds_frac": (0.1, 0.1, 0.5, 0.5),
+    }
+
+    geometry = label._geometry_with_dragged_handle(2, (0.8, 0.4))
+
+    assert geometry == {
+        "kind": "rectangle",
+        "bounds_frac": (0.1, 0.1, 0.8, 0.4),
+    }
 
 
 def test_viewer_dialog_initializes_panel_from_thumbnail_processing(qapp, monkeypatch):
