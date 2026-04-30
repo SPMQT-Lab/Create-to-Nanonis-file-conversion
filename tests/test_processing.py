@@ -12,6 +12,7 @@ from probeflow.processing import (
     export_png,
     facet_level,
     fourier_filter,
+    fft_soft_border,
     gaussian_high_pass,
     gaussian_smooth,
     gmm_autoclip,
@@ -76,10 +77,23 @@ class TestRemoveBadLines:
         # Unrelated rows are unchanged.
         assert np.allclose(out[0], arr[0])
 
+    def test_single_spike_row_fixed_when_other_rows_are_flat(self):
+        arr = np.ones((16, 8), dtype=np.float64)
+        arr[7, :] = 100.0
+
+        out = remove_bad_lines(arr, threshold_mad=3.0)
+
+        assert np.allclose(out[7], 1.0)
+        np.testing.assert_array_equal(out[0], arr[0])
+
     def test_nan_input_safe(self):
         arr = np.full((8, 8), np.nan)
         out = remove_bad_lines(arr)
         assert out.shape == arr.shape  # no crash
+
+    def test_invalid_threshold_raises(self):
+        with pytest.raises(ValueError, match="threshold_mad"):
+            remove_bad_lines(np.ones((4, 4)), threshold_mad=-1.0)
 
 
 # ─── subtract_background ────────────────────────────────────────────────────
@@ -201,6 +215,15 @@ class TestSubtractBackground:
     def test_preserves_shape(self, tilted_image):
         assert subtract_background(tilted_image).shape == tilted_image.shape
 
+    def test_invalid_step_threshold_raises(self):
+        with pytest.raises(ValueError, match="step_threshold_deg"):
+            subtract_background(
+                np.ones((8, 8)),
+                order=1,
+                step_tolerance=True,
+                step_threshold_deg=float("nan"),
+            )
+
 
 # ─── stm_line_background ─────────────────────────────────────────────────────
 
@@ -270,6 +293,10 @@ class TestAlignRows:
         # After fitting+subtracting per-row linear trend, residuals ≈ 0
         assert np.allclose(out, 0.0, atol=1e-10)
 
+    def test_invalid_method_raises(self):
+        with pytest.raises(ValueError, match="method must be"):
+            align_rows(np.ones((4, 4)), method="mode")
+
 
 # ─── facet_level ─────────────────────────────────────────────────────────────
 
@@ -287,6 +314,16 @@ class TestFacetLevel:
 # ─── fourier_filter ──────────────────────────────────────────────────────────
 
 class TestFourierFilter:
+    def test_low_pass_preserves_constant_image(self):
+        arr = np.ones((32, 32), dtype=float) * 5.0
+        out = fourier_filter(arr, mode="low_pass", cutoff=0.2)
+        np.testing.assert_allclose(out, arr, atol=1e-12)
+
+    def test_high_pass_removes_constant_image(self):
+        arr = np.ones((32, 32), dtype=float) * 5.0
+        out = fourier_filter(arr, mode="high_pass", cutoff=0.2)
+        np.testing.assert_allclose(out, np.zeros_like(arr), atol=1e-12)
+
     def test_radial_low_pass_reduces_high_frequency_ripple(self):
         Y, X = np.mgrid[:64, :64]
         arr = np.sin(2 * np.pi * X / 2.0)  # 2-pixel period → high freq
@@ -308,12 +345,22 @@ class TestFourierFilter:
         out = fourier_filter(arr, mode="low_pass", cutoff=0.3)
         assert out.shape == arr.shape
 
-    def test_nan_input_returns_finite_filled_output(self):
+    def test_nan_input_preserves_nan_mask(self):
         arr = np.random.default_rng(0).normal(size=(20, 16))
         arr[4, 5] = np.nan
         out = fourier_filter(arr, mode="low_pass", cutoff=0.3)
         assert out.shape == arr.shape
-        assert np.all(np.isfinite(out))
+        assert np.isnan(out[4, 5])
+        assert np.all(np.isfinite(out[np.isfinite(arr)]))
+
+    def test_invalid_parameters_raise(self):
+        arr = np.ones((8, 8))
+        with pytest.raises(ValueError, match="mode"):
+            fourier_filter(arr, mode="bad")
+        with pytest.raises(ValueError, match="cutoff"):
+            fourier_filter(arr, cutoff=1.5)
+        with pytest.raises(ValueError, match="window"):
+            fourier_filter(arr, window="bad")
 
 
 class TestGaussianHighPass:
@@ -332,6 +379,26 @@ class TestGaussianHighPass:
         out = gaussian_high_pass(arr, sigma_px=4.0)
         assert np.isnan(out[3, 4])
 
+    def test_all_nan_stays_nan(self):
+        arr = np.full((8, 8), np.nan)
+        out = gaussian_high_pass(arr, sigma_px=4.0)
+        assert np.isnan(out).all()
+
+    def test_invalid_sigma_raises(self):
+        with pytest.raises(ValueError, match="sigma_px"):
+            gaussian_high_pass(np.ones((8, 8)), sigma_px=float("nan"))
+
+
+class TestFftSoftBorder:
+    def test_high_pass_removes_constant_image(self):
+        arr = np.ones((32, 32), dtype=float) * 5.0
+        out = fft_soft_border(arr, mode="high_pass", cutoff=0.2)
+        np.testing.assert_allclose(out, np.zeros_like(arr), atol=1e-12)
+
+    def test_invalid_cutoff_raises(self):
+        with pytest.raises(ValueError, match="cutoff"):
+            fft_soft_border(np.ones((8, 8)), cutoff=-0.1)
+
 
 class TestPeriodicNotchFilter:
     def test_suppresses_selected_periodic_peak(self):
@@ -346,6 +413,10 @@ class TestPeriodicNotchFilter:
         out = periodic_notch_filter(arr, [(3, 2)], radius_px=2.0)
         assert out.shape == arr.shape
         assert np.isnan(out[2, 3])
+
+    def test_invalid_radius_raises(self):
+        with pytest.raises(ValueError, match="radius_px"):
+            periodic_notch_filter(np.ones((8, 8)), [(2, 0)], radius_px=-1.0)
 
 
 class TestPatchInterpolate:
@@ -375,6 +446,15 @@ class TestGaussianSmooth:
         assert np.isnan(out[5, 5])
         assert np.isfinite(out[0, 0])
 
+    def test_all_nan_stays_nan(self):
+        arr = np.full((8, 8), np.nan)
+        out = gaussian_smooth(arr, sigma_px=1.0)
+        assert np.isnan(out).all()
+
+    def test_invalid_sigma_raises(self):
+        with pytest.raises(ValueError, match="sigma_px"):
+            gaussian_smooth(np.ones((8, 8)), sigma_px=-0.5)
+
 
 # ─── edge_detect ─────────────────────────────────────────────────────────────
 
@@ -394,6 +474,10 @@ class TestEdgeDetect:
     def test_unknown_method_raises(self):
         with pytest.raises(ValueError):
             edge_detect(np.zeros((4, 4)), method="bogus")
+
+    def test_invalid_sigma_raises(self):
+        with pytest.raises(ValueError, match="sigma"):
+            edge_detect(np.ones((8, 8)), method="log", sigma=float("nan"))
 
 
 # ─── gmm_autoclip ────────────────────────────────────────────────────────────

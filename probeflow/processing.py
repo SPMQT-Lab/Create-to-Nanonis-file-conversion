@@ -24,6 +24,46 @@ from scipy.ndimage import (
 _FONT_PATH = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 
 
+def _finite_mean(arr: np.ndarray, default: float = 0.0) -> float:
+    vals = np.asarray(arr, dtype=np.float64)
+    finite = vals[np.isfinite(vals)]
+    return float(finite.mean()) if finite.size else float(default)
+
+
+def _finite_median(arr: np.ndarray, default: float = 0.0) -> float:
+    vals = np.asarray(arr, dtype=np.float64)
+    finite = vals[np.isfinite(vals)]
+    return float(np.median(finite)) if finite.size else float(default)
+
+
+def _nonnegative_finite(value: float, name: str) -> float:
+    value = float(value)
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return value
+
+
+def _nan_normalized_gaussian(arr: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian blur that ignores NaNs instead of mean-filling them."""
+    a = np.asarray(arr, dtype=np.float64)
+    finite = np.isfinite(a)
+    if not finite.any():
+        return np.full(a.shape, np.nan, dtype=np.float64)
+    sigma = max(float(sigma), 0.0)
+    values = np.where(finite, a, 0.0)
+    weights = finite.astype(np.float64)
+    blurred_values = gaussian_filter(values, sigma=sigma, mode="reflect")
+    blurred_weights = gaussian_filter(weights, sigma=sigma, mode="reflect")
+    out = np.full(a.shape, np.nan, dtype=np.float64)
+    np.divide(
+        blurred_values,
+        blurred_weights,
+        out=out,
+        where=blurred_weights > 1e-12,
+    )
+    return out
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 1.  remove_bad_lines
 # ═════════════════════════════════════════════════════════════════════════════
@@ -38,12 +78,15 @@ def remove_bad_lines(arr: np.ndarray, threshold_mad: float = 5.0) -> np.ndarray:
     rows above and below (falls back to the single nearest good row when
     only one side is available).
     """
+    threshold_mad = _nonnegative_finite(threshold_mad, "threshold_mad")
     arr = arr.astype(np.float64, copy=True)
     Ny, Nx = arr.shape
 
-    row_meds = np.array([
-        float(np.nanmedian(arr[r])) for r in range(Ny)
-    ])
+    row_meds = np.full(Ny, np.nan, dtype=np.float64)
+    for r in range(Ny):
+        finite = arr[r][np.isfinite(arr[r])]
+        if finite.size:
+            row_meds[r] = float(np.median(finite))
 
     finite_meds = row_meds[np.isfinite(row_meds)]
     if finite_meds.size == 0:
@@ -52,9 +95,10 @@ def remove_bad_lines(arr: np.ndarray, threshold_mad: float = 5.0) -> np.ndarray:
     overall_med = float(np.median(finite_meds))
     mad = float(np.median(np.abs(finite_meds - overall_med)))
     if mad == 0.0:
-        return arr
-
-    bad_mask = np.abs(row_meds - overall_med) > threshold_mad * mad
+        tol = np.finfo(np.float64).eps * max(abs(overall_med), 1.0) * 16.0
+        bad_mask = np.abs(row_meds - overall_med) > tol
+    else:
+        bad_mask = np.abs(row_meds - overall_med) > threshold_mad * mad
     bad_rows = np.where(bad_mask)[0]
 
     if bad_rows.size == 0:
@@ -140,6 +184,8 @@ def subtract_background(
     """
     if order < 1 or order > 4:
         raise ValueError(f"order must be 1..4, got {order}")
+    if step_tolerance and not np.isfinite(step_threshold_deg):
+        raise ValueError("step_threshold_deg must be finite")
 
     arr = arr.astype(np.float64, copy=True)
     Ny, Nx = arr.shape
@@ -188,7 +234,7 @@ def subtract_background(
             return arr
 
     if step_tolerance and Ny >= 3 and Nx >= 3:
-        gy, gx = np.gradient(np.where(np.isfinite(arr), arr, 0.0))
+        gy, gx = np.gradient(np.where(np.isfinite(arr), arr, _finite_median(arr)))
         slope_mag = np.sqrt(gx ** 2 + gy ** 2).ravel()
         tan_thresh = math.tan(math.radians(step_threshold_deg))
         candidate = finite & (slope_mag < tan_thresh)
@@ -296,22 +342,25 @@ def align_rows(arr: np.ndarray, method: str = 'median') -> np.ndarray:
     This is the most effective first step for raw STM data where each scan
     line has an independent height offset due to thermal drift or tip jumps.
     """
+    if method not in {"median", "mean", "linear"}:
+        raise ValueError("method must be 'median', 'mean', or 'linear'")
+
     arr = arr.astype(np.float64, copy=True)
     Ny, Nx = arr.shape
 
     if method == 'median':
         for r in range(Ny):
             row = arr[r]
-            ref = float(np.nanmedian(row))
-            if np.isfinite(ref):
-                arr[r] -= ref
+            finite = row[np.isfinite(row)]
+            if finite.size:
+                arr[r] -= float(np.median(finite))
 
     elif method == 'mean':
         for r in range(Ny):
             row = arr[r]
-            ref = float(np.nanmean(row))
-            if np.isfinite(ref):
-                arr[r] -= ref
+            finite = row[np.isfinite(row)]
+            if finite.size:
+                arr[r] -= float(finite.mean())
 
     elif method == 'linear':
         xs = np.linspace(-1.0, 1.0, Nx)
@@ -322,7 +371,6 @@ def align_rows(arr: np.ndarray, method: str = 'median') -> np.ndarray:
                 continue
             coeffs = np.polyfit(xs[fin], row[fin], 1)
             arr[r] -= np.polyval(coeffs, xs)
-
     return arr
 
 
@@ -347,8 +395,14 @@ def facet_level(arr: np.ndarray, threshold_deg: float = 3.0) -> np.ndarray:
     if Ny < 3 or Nx < 3:
         return arr
 
-    # Estimate local gradient via central differences (pixel units)
-    gy, gx = np.gradient(arr)
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return arr
+
+    # Estimate local gradient via central differences (pixel units). NaNs are
+    # filled only for gradient estimation; they are still excluded from fitting.
+    grad_arr = np.where(finite, arr, _finite_median(arr))
+    gy, gx = np.gradient(grad_arr)
 
     # Convert threshold from degrees to tangent value
     tan_thresh = math.tan(math.radians(threshold_deg))
@@ -393,16 +447,38 @@ def fourier_filter(
     This is a coarse circular frequency cutoff, not an ImageJ-style periodic
     spot/vector filter.
     """
+    if mode not in {"low_pass", "high_pass"}:
+        raise ValueError("mode must be 'low_pass' or 'high_pass'")
+    if not np.isfinite(cutoff) or not 0.0 <= float(cutoff) <= 1.0:
+        raise ValueError("cutoff must be finite and in [0, 1]")
+    window_key = str(window or "none").lower()
+    if window_key not in {"hanning", "hamming", "none", "rectangular", "boxcar"}:
+        raise ValueError("window must be 'hanning', 'hamming', or 'none'")
+
     arr = arr.astype(np.float64, copy=True)
     Ny, Nx = arr.shape
 
-    mean_val = float(np.nanmean(arr))
-    arr[~np.isfinite(arr)] = mean_val
+    nan_mask = ~np.isfinite(arr)
+    if nan_mask.all():
+        return arr
 
-    if window == 'hanning':
+    mean_val = _finite_mean(arr)
+    filled = np.where(nan_mask, mean_val, arr)
+    centered = filled - mean_val
+
+    if mode == "low_pass" and float(cutoff) >= 1.0:
+        out = filled
+        out[nan_mask] = np.nan
+        return out
+    if mode == "high_pass" and float(cutoff) <= 0.0:
+        out = centered
+        out[nan_mask] = np.nan
+        return out
+
+    if window_key == 'hanning':
         wy = np.hanning(Ny)
         wx = np.hanning(Nx)
-    elif window == 'hamming':
+    elif window_key == 'hamming':
         wy = np.hamming(Ny)
         wx = np.hamming(Nx)
     else:
@@ -410,29 +486,28 @@ def fourier_filter(
         wx = np.ones(Nx)
 
     win2d = np.outer(wy, wx)
-    windowed = arr * win2d
+    windowed = centered * win2d
 
     F = np.fft.fft2(windowed)
     F = np.fft.fftshift(F)
 
     cy, cx = Ny / 2.0, Nx / 2.0
-    yr = (np.arange(Ny) - cy) / cy
-    xr = (np.arange(Nx) - cx) / cx
+    yr = (np.arange(Ny) - cy) / max(cy, 1e-9)
+    xr = (np.arange(Nx) - cx) / max(cx, 1e-9)
     Xr, Yr = np.meshgrid(xr, yr)
     R = np.sqrt(Xr**2 + Yr**2)
 
     if mode == 'low_pass':
         mask = (R <= cutoff).astype(np.float64)
-    else:
+    elif mode == 'high_pass':
         mask = (R >= cutoff).astype(np.float64)
 
     F_filtered = F * mask
     F_filtered = np.fft.ifftshift(F_filtered)
     result = np.fft.ifft2(F_filtered).real
-
-    safe_win = np.where(win2d > 1e-6, win2d, 1.0)
-    result = result / safe_win
-
+    if mode == "low_pass":
+        result = result + mean_val
+    result[nan_mask] = np.nan
     return result
 
 
@@ -443,12 +518,13 @@ def gaussian_high_pass(arr: np.ndarray, sigma_px: float = 8.0) -> np.ndarray:
     structures with a Gaussian blur, then subtract that smooth component while
     preserving high-frequency detail.
     """
+    sigma_px = _nonnegative_finite(sigma_px, "sigma_px")
     a = arr.astype(np.float64, copy=True)
     nan_mask = ~np.isfinite(a)
-    fill = float(np.nanmean(a)) if (~nan_mask).any() else 0.0
-    filled = np.where(nan_mask, fill, a)
-    bg = gaussian_filter(filled, sigma=max(float(sigma_px), 0.1), mode="reflect")
-    out = filled - bg
+    if nan_mask.all():
+        return a
+    bg = _nan_normalized_gaussian(a, max(sigma_px, 0.1))
+    out = a - bg
     out[nan_mask] = np.nan
     return out
 
@@ -464,6 +540,7 @@ def periodic_notch_filter(
     ``peaks`` are integer ``(dx, dy)`` offsets from the centred FFT origin in
     pixels. A Gaussian notch is applied at each offset and its conjugate.
     """
+    radius_px = _nonnegative_finite(radius_px, "radius_px")
     a = arr.astype(np.float64, copy=True)
     Ny, Nx = a.shape
     if Ny < 2 or Nx < 2 or not peaks:
@@ -477,7 +554,7 @@ def periodic_notch_filter(
     cy, cx = Ny // 2, Nx // 2
     yy, xx = np.mgrid[:Ny, :Nx]
     notch = np.ones((Ny, Nx), dtype=np.float64)
-    sigma = max(float(radius_px), 0.5)
+    sigma = max(radius_px, 0.5)
 
     for peak in peaks:
         try:
@@ -509,15 +586,12 @@ def gaussian_smooth(arr: np.ndarray, sigma_px: float = 1.0) -> np.ndarray:
     sigma_px — standard deviation in pixels.  Typical STM values: 0.5–3.
     NaN pixels are handled by weighted normalisation so they don't propagate.
     """
+    sigma_px = _nonnegative_finite(sigma_px, "sigma_px")
     arr = arr.astype(np.float64, copy=True)
-
     nan_mask = ~np.isfinite(arr)
-    if nan_mask.any():
-        fill = float(np.nanmean(arr))
-        arr[nan_mask] = fill
-
-    smoothed = gaussian_filter(arr, sigma=sigma_px, mode='reflect')
-
+    if nan_mask.all():
+        return arr
+    smoothed = _nan_normalized_gaussian(arr, sigma_px)
     if nan_mask.any():
         smoothed[nan_mask] = np.nan
 
@@ -545,10 +619,14 @@ def edge_detect(
     negative = dark edges/valleys.  Useful for atomic-resolution contrast
     enhancement and finding adsorption sites.
     """
+    sigma = _nonnegative_finite(sigma, "sigma")
+    sigma2 = _nonnegative_finite(sigma2, "sigma2")
     a = arr.astype(np.float64, copy=True)
     nan_mask = ~np.isfinite(a)
+    if nan_mask.all():
+        return a
     if nan_mask.any():
-        a[nan_mask] = float(np.nanmean(a))
+        a[nan_mask] = _finite_mean(a)
 
     if method == 'laplacian':
         result = _nd_laplace(a)
@@ -1338,6 +1416,10 @@ def fft_soft_border(
         raise ValueError("fft_soft_border expects a 2-D array")
     if not 0.0 < border_frac < 0.5:
         raise ValueError("border_frac must be in (0, 0.5)")
+    if mode not in {"low_pass", "high_pass"}:
+        raise ValueError(f"Unknown mode: {mode!r}")
+    if not np.isfinite(cutoff) or not 0.0 <= float(cutoff) <= 1.0:
+        raise ValueError("cutoff must be finite and in [0, 1]")
 
     a = arr.astype(np.float64, copy=True)
     Ny, Nx = a.shape
@@ -1368,14 +1450,14 @@ def fft_soft_border(
     R = np.sqrt(Xr ** 2 + Yr ** 2)
     if mode == "low_pass":
         mask = (R <= cutoff).astype(np.float64)
-    elif mode == "high_pass":
-        mask = (R >= cutoff).astype(np.float64)
     else:
-        raise ValueError(f"Unknown mode: {mode!r}")
+        mask = (R >= cutoff).astype(np.float64)
 
     out = np.fft.ifft2(np.fft.ifftshift(F * mask)).real
     safe_win = np.where(win2d > 1e-6, win2d, 1.0)
-    out = out / safe_win + mean_val
+    out = out / safe_win
+    if mode == "low_pass":
+        out = out + mean_val
     out[nan_mask] = np.nan
     return out
 
